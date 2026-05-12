@@ -86,6 +86,10 @@ We merge the two-layer architecture into a single `Agent` class, with `chatAnthr
 
 private async chatAnthropic(userMessage: string): Promise<void> {
   this.anthropicMessages.push({ role: "user", content: userMessage });
+  // Trigger auto-compact at the turn boundary: the last message is now
+  // plain user text, so compactAnthropic's slice(0, -1) won't sever a
+  // tool_use <-> tool_result pair (see Chapter 7).
+  await this.checkAndCompact();
 
   while (true) {
     if (this.abortController?.signal.aborted) break;
@@ -144,9 +148,6 @@ private async chatAnthropic(userMessage: string): Promise<void> {
 
     // Push tool results as user message (Anthropic API requirement)
     this.anthropicMessages.push({ role: "user", content: toolResults });
-
-    // Context compaction check (see Chapter 7)
-    await this.checkAndCompact();
   }
 }
 ```
@@ -156,6 +157,10 @@ private async chatAnthropic(userMessage: string): Promise<void> {
 
 async def _chat_anthropic(self, user_message: str) -> None:
     self._anthropic_messages.append({"role": "user", "content": user_message})
+    # Trigger auto-compact at the turn boundary: the last message is now
+    # plain user text, so _compact_anthropic's [:-1] won't sever a
+    # tool_use <-> tool_result pair (see Chapter 7).
+    await self._check_and_compact()
 
     while True:
         if self._aborted:
@@ -207,7 +212,6 @@ async def _chat_anthropic(self, user_message: str) -> None:
             tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result})
 
         self._anthropic_messages.append({"role": "user", "content": tool_results})
-        await self._check_and_compact()
 ```
 <!-- tabs:end -->
 

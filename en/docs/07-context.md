@@ -281,6 +281,8 @@ async def _check_and_compact(self) -> None:
 
 `effectiveWindow = model context window - 20000`, reserving space for new input/output. For Claude (200K window), the trigger point is at approximately 76.5% total utilization.
 
+> ⚠️ **Caller contract**: `checkAndCompact` must only be called at a turn boundary — after the user message is pushed into the message array and before the API call. The `compactAnthropic` / `compactOpenAI` functions below assume the last message is a plain user-text message: they `slice(0, -1)` it off when building the summarization request and re-append it after the summary lands. If you call them mid-tool-loop, the last message will be a `tool_result` (Anthropic) or a `tool`-role message (OpenAI); slicing it off orphans the preceding `assistant`'s `tool_use` / `tool_calls`, and the API will reject the summarize request.
+
 #### Anthropic Backend Compression
 
 <!-- tabs:start -->
@@ -494,7 +496,7 @@ def _run_compression_pipeline(self) -> None:
 ```
 <!-- tabs:end -->
 
-Tiers 1-3 run **before** the API call (zero API cost), while Tier 4 checks **after** the API call (it needs `lastInputTokenCount` to determine whether to trigger). The order is also intentional: Budget compresses large results first, making Snip's deduplication judgments more accurate, and Microcompact performs indiscriminate cleanup last when the time condition is met.
+Tiers 1-3 run **before** every API call (zero API cost). Tier 4 runs at the **turn boundary** — after the user message is pushed into the array and before the `while` loop starts. **Do not** place Tier 4 at the end of the tool loop: at that point the last message is `{role: "user", content: [tool_result, ...]}`, and `compactAnthropic`'s `slice(0, -1)` would sever its pairing with the preceding `assistant` message's `tool_use`, causing the Anthropic API to reject the summarize call with *"tool_use ids were found without tool_result blocks immediately after"*. `lastInputTokenCount` is still usable in the new location — it reflects the state of the previous turn's final API call, which is enough to decide whether to trigger. The intra-pipeline order is also intentional: Budget compresses large results first, making Snip's deduplication judgments more accurate, and Microcompact performs indiscriminate cleanup last when the time condition is met.
 
 ## Comparison
 

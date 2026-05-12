@@ -444,6 +444,10 @@ class Agent:
         print_info("Conversation compacted.")
 
     async def _compact_anthropic(self) -> None:
+        # Invariant: caller must ensure the last message is a plain user-text
+        # message (not a tool_result). We slice it off below; if it were a
+        # tool_result, the preceding assistant's tool_use would be orphaned
+        # and the API would reject the summarize call.
         if len(self._anthropic_messages) < 4:
             return
         last_user_msg = self._anthropic_messages[-1]
@@ -466,6 +470,10 @@ class Agent:
         self.last_input_token_count = 0
 
     async def _compact_openai(self) -> None:
+        # Invariant: caller must ensure the last message is a plain user-text
+        # message (not a `tool` role result). Same reasoning as
+        # _compact_anthropic — slicing off a tool result would orphan the
+        # preceding assistant's tool_calls.
         if len(self._openai_messages) < 5:
             return
         system_msg = self._openai_messages[0]
@@ -835,6 +843,10 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
     async def _chat_anthropic(self, user_message: str) -> None:
         self._anthropic_messages.append({"role": "user", "content": user_message})
+        # Auto-compact at turn boundary only — the last message is now plain
+        # user text, so the slice in _compact_anthropic won't sever a
+        # tool_use ↔ tool_result pair from the previous turn's tool execution.
+        await self._check_and_compact()
 
         # Start async memory prefetch (non-blocking, fires once per user turn)
         memory_prefetch: MemoryPrefetch | None = None
@@ -966,9 +978,6 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 self._anthropic_messages.append({"role": "user", "content": tool_results})
             self._context_cleared = False
 
-
-            await self._check_and_compact()
-
     @staticmethod
     def _block_to_dict(block) -> dict:
         """Convert an Anthropic content block to a plain dict for storage."""
@@ -1057,6 +1066,10 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
     async def _chat_openai(self, user_message: str) -> None:
         self._openai_messages.append({"role": "user", "content": user_message})
+        # Auto-compact at turn boundary only — see _chat_anthropic for rationale.
+        # The last message is now plain user text, so the slice in
+        # _compact_openai won't orphan a tool_calls / tool message pair.
+        await self._check_and_compact()
 
         # Start async memory prefetch (non-blocking, fires once per user turn)
         memory_prefetch: MemoryPrefetch | None = None
@@ -1193,7 +1206,6 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                         self._openai_messages.append({"role": "tool", "tool_call_id": ct["tc"]["id"], "content": res})
 
             self._context_cleared = False
-            await self._check_and_compact()
 
     async def _call_openai_stream(self) -> dict:
         async def _do():

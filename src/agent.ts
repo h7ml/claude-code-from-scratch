@@ -490,6 +490,10 @@ export class Agent {
   }
 
   private async compactAnthropic(): Promise<void> {
+    // Invariant: caller must ensure the last message is a plain user-text
+    // message (not a tool_result). We slice it off below; if it were a
+    // tool_result, the preceding assistant's tool_use would be orphaned and
+    // the API would reject the summarize call.
     if (this.anthropicMessages.length < 4) return;
     const lastUserMsg = this.anthropicMessages[this.anthropicMessages.length - 1];
     const summaryReq: Anthropic.MessageParam[] = [
@@ -521,6 +525,10 @@ export class Agent {
   }
 
   private async compactOpenAI(): Promise<void> {
+    // Invariant: caller must ensure the last message is a plain user-text
+    // message (not a `tool` role result). Same reasoning as compactAnthropic
+    // — slicing off a tool result would orphan the preceding assistant's
+    // tool_calls.
     if (this.openaiMessages.length < 5) return;
     const systemMsg = this.openaiMessages[0];
     const lastUserMsg = this.openaiMessages[this.openaiMessages.length - 1];
@@ -967,6 +975,10 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
   private async chatAnthropic(userMessage: string): Promise<void> {
     this.anthropicMessages.push({ role: "user", content: userMessage });
+    // Auto-compact at turn boundary only — the last message is now plain
+    // user text, so the slice in compactAnthropic won't sever a
+    // tool_use ↔ tool_result pair from the previous turn's tool execution.
+    await this.checkAndCompact();
 
     // Start async memory prefetch (non-blocking, fires once per user turn)
     let memoryPrefetch: MemoryPrefetch | null = null;
@@ -1123,9 +1135,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       }
       this.contextCleared = false;
 
-
       firstIteration = false;
-      await this.checkAndCompact();
     }
   }
 
@@ -1222,6 +1232,10 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
   private async chatOpenAI(userMessage: string): Promise<void> {
     this.openaiMessages.push({ role: "user", content: userMessage });
+    // Auto-compact at turn boundary only — see chatAnthropic for rationale.
+    // The last message is now plain user text, so the slice in compactOpenAI
+    // won't orphan a tool_calls / tool message pair.
+    await this.checkAndCompact();
 
     // Start async memory prefetch (non-blocking, fires once per user turn)
     let memoryPrefetch: MemoryPrefetch | null = null;
@@ -1377,7 +1391,6 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       }
 
       this.contextCleared = false;
-      await this.checkAndCompact();
     }
   }
 
