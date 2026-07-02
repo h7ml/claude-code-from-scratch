@@ -312,20 +312,24 @@ def _list_files(inp: dict) -> str:
         base = Path(inp.get("path") or ".")
         pattern = inp["pattern"]
         files = []
+        extra = 0
         for p in base.glob(pattern):
             if p.is_file():
                 rel = str(p.relative_to(base) if base != Path(".") else p)
                 # Skip node_modules and .git
                 if "node_modules" in rel or ".git" in rel.split(os.sep):
                     continue
-                files.append(rel)
-                if len(files) >= 200:
-                    break
+                # Keep at most 200 entries, but keep counting so the model
+                # knows how many matches were omitted (matches TS behavior).
+                if len(files) < 200:
+                    files.append(rel)
+                else:
+                    extra += 1
         if not files:
             return "No files found matching the pattern."
-        result = "\n".join(files[:200])
-        if len(files) > 200:
-            result += f"\n... and {len(files) - 200} more"
+        result = "\n".join(files)
+        if extra:
+            result += f"\n... and {extra} more"
         return result
     except Exception as e:
         return f"Error listing files: {e}"
