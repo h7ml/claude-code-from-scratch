@@ -114,11 +114,14 @@ private async classifyToolCall(toolName, input) {
   if (checkPermission(...).action === "deny") return deny;        // 硬底线仍前置
   if (AUTO_MODE_FAST_PATH_TOOLS.has(toolName)) return allow;      // 只读工具跳过分类
   const transcript = buildClassifierTranscript(history, { toolName, input });
-  const raw = await sideQuery(buildClassifierSystem(rules),       // 分类器请求（temperature 0）
-                             classifierUserMessage(rules, transcript, loadClaudeMd()));
-  const verdict = parseBlockVerdict(raw);                         // 不可解析 → 拦
+  const system = buildClassifierSystem(rules);
+  // 第一段：激进廉价闸（temperature 0，不看意图、任一规则可能命中就拦）
+  const s1 = parseBlockVerdict(await sideQuery(system, userMsg(rules.suffix_stage1)));
+  if (!s1.block) return allow;                                    // 第一段放行 → 一次调用搞定
+  // 第二段：审慎裁决（会权衡用户意图、能解除拦截），结论最终
+  const verdict = parseBlockVerdict(await sideQuery(system, userMsg(rules.suffix_stage2)));
   if (verdict.block) { /* 计数；达上限回退人工 */ return deny/confirm; }
-  return allow;
+  return allow;                                                   // 第二段凭意图解除了拦截
 }
 ```
 
@@ -128,7 +131,7 @@ fast-path 放行只读或无副作用的工具（`read_file` / `grep_search` 等
 
 ### 差在哪
 
-我们做的是单段分类器，真实 Claude Code 是两段式（先一个快模型抢答，判拦再升级到一个会思考的模型复核）。规则桶我们只带了代表性子集，全量约九十多条，用 `claude auto-mode defaults` 可以自取。还有一批我们没做，各自在真实实现里都是独立的一层：GrowthBook 下发的灰度配置和熔断开关、命令级的 Bash 分类器、以及帮你审自己写的规则的 critique 元评估器——这些第 18 章（how-claude-code-works）都有。分类器背后跑哪个模型、阈值多少、服务端会不会二次改写提示词，是我们看不到的盲区。
+我们做的是两段式,和真实 Claude Code 的 `both` 模式一样:第一段是激进的廉价闸——不看用户意图、不认 ALLOW 例外,只要「任一规则可能命中」就拦(后缀是 `suffix_stage1`);第一段放行就一次调用搞定。第一段拦了,才进第二段的审慎裁决——这一段**会**权衡 transcript 里的用户意图、能解除拦截(后缀 `suffix_stage2`),它的结论是最终结论。两段用同一套系统提示,只换 user 消息里的后缀。差别在:我们没复刻真实客户端那两段的 `stop_sequences` 和 thinking-token 细节(第一段 max_tokens 更小、第二段能思考),只复刻了「先廉价闸、后审慎复核」这个流程。规则桶我们只带了代表性子集,全量约九十多条,用 `claude auto-mode defaults` 可以自取。还有一批我们没做,各自在真实实现里都是独立的一层:GrowthBook 下发的灰度配置和熔断开关、命令级的 Bash 分类器、以及帮你审自己写的规则的 critique 元评估器——这些第 18 章(how-claude-code-works)都有。分类器背后跑哪个模型、阈值多少、服务端会不会二次改写提示词,是我们看不到的盲区。
 
 ## 三者对照
 
@@ -142,7 +145,7 @@ fast-path 放行只读或无副作用的工具（`read_file` / `grep_search` 等
 
 ## 诚实边界
 
-逐字照抄的是 client 侧的提示词正文、决策契约和工具 schema——这些能从泄露的二进制里直接抽出来。评估器和分类器背后跑的模型、`effort` 档位、阈值、服务端是否二次改写提示词，是盲区，不猜。教学简化的地方逐条标了：`/goal` 用文本解析代替 `json_schema` 强约束；`/loop` 用会话内定时器代替 cron 引擎加 KAIROS、不接云端；Auto Mode 是单段而非两段、规则桶是子集、不做灰度/熔断/critique。TS 和 Python 两份实现互为镜像，本章描述的行为两边一致。
+逐字照抄的是 client 侧的提示词正文、决策契约和工具 schema——这些能从泄露的二进制里直接抽出来。评估器和分类器背后跑的模型、`effort` 档位、阈值、服务端是否二次改写提示词，是盲区，不猜。教学简化的地方逐条标了：`/goal` 用文本解析代替 `json_schema` 强约束；`/loop` 用会话内定时器代替 cron 引擎加 KAIROS、不接云端；Auto Mode 做了两段式的流程但省了真实客户端那两段的 stop-sequence / thinking-token 细节、规则桶是子集、不做灰度/熔断/critique。TS 和 Python 两份实现互为镜像，本章描述的行为两边一致。
 
 ## 交叉引用
 

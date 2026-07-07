@@ -9,7 +9,10 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/cli.js",
-    "dev": "tsc && node dist/cli.js"
+    "dev": "tsc && node dist/cli.js",
+    "test": "node -e \"require('node:fs').rmSync('dist-test',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
+    "test:py": "python3 -B -m unittest discover -s python/tests -p \"test_*.py\"",
+    "check": "npm run build && npm test && npm run test:py"
   },
   "keywords": [
     "claude-code",

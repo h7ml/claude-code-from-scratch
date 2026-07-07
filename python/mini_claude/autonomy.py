@@ -264,25 +264,40 @@ LOOP_MAX_ITERATIONS = 100
 # (deny rules, plan-mode read-only) still run first; the classifier only judges
 # what would otherwise stop to ask a human.
 #
-# The prompt skeleton, output format, suffix, and CLAUDE.md-injection wording are
-# quoted verbatim from how-claude-code-works ch18's appendix; the rule buckets
-# are a representative subset of `claude auto-mode defaults`. Both live in
-# assets/auto-mode-rules.json so the (long) English exists once, not duplicated
-# across the TS and Python mirrors. What we DON'T reproduce: the two-stage
-# (fast+thinking) classifier, the GrowthBook gate / circuit breaker, the
-# command-level Bash classifier, and the rule-critique meta-evaluator.
+# The prompt skeleton, output format, stage suffixes, and CLAUDE.md-injection
+# wording are quoted verbatim from how-claude-code-works ch18's appendix; the
+# rule buckets are a representative subset of `claude auto-mode defaults`. Both
+# live in assets/auto-mode-rules.json so the (long) English exists once, not
+# duplicated across the TS and Python mirrors. We DO run the two-stage flow
+# (stage 1 aggressive gate → stage 2 careful adjudication), minus the exact
+# stop-sequence / thinking-token mechanics of the real client. What we DON'T
+# reproduce: the GrowthBook gate / circuit breaker, the command-level Bash
+# classifier, and the rule-critique meta-evaluator.
 
 _cached_rules: dict | None = None
+
+_REQUIRED_RULE_STRINGS = ("system_skeleton", "output_format", "suffix", "suffix_stage1", "suffix_stage2", "claude_md_injection")
+_REQUIRED_RULE_ARRAYS = ("allow", "soft_deny", "hard_deny", "environment")
 
 
 def load_auto_mode_rules() -> dict:
     """Load the classifier rules asset (cached). Resolved relative to this module
-    so it works regardless of the process CWD."""
+    so it works regardless of the process CWD. Validates every field and raises
+    on anything missing/empty — a stale or truncated asset must fail closed (the
+    classifier's try/except turns a raise into a block), never leave a suffix
+    missing that would silently degrade a stage."""
     global _cached_rules
     if _cached_rules is None:
         # mini_claude/ -> python/ -> repo root -> assets/
         path = Path(__file__).resolve().parent.parent.parent / "assets" / "auto-mode-rules.json"
-        _cached_rules = json.loads(path.read_text(encoding="utf-8"))
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        for k in _REQUIRED_RULE_STRINGS:
+            if not isinstance(obj.get(k), str) or not obj[k].strip():
+                raise ValueError(f"auto-mode rules: missing/empty string field '{k}'")
+        for k in _REQUIRED_RULE_ARRAYS:
+            if not isinstance(obj.get(k), list) or not obj[k]:
+                raise ValueError(f"auto-mode rules: missing/empty array field '{k}'")
+        _cached_rules = obj
     return _cached_rules
 
 
@@ -334,9 +349,29 @@ def _clip(s: str, max_len: int = 1500) -> str:
 
 
 def _cjson(obj) -> str:
-    """Compact JSON matching JS JSON.stringify byte-for-byte (no spaces after
-    separators, no non-ASCII escaping) so the TS and Python transcripts agree."""
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    """Compact JSON matching JS safeJson byte-for-byte: no spaces after
+    separators, no non-ASCII escaping, and < > & escaped to their \\u forms.
+    Plain JSON escapes quotes and newlines but NOT angle brackets, so a value
+    like `</transcript>` or `<block>no</block>` would appear literally inside our
+    `<transcript>` wrapper and could reframe the classifier — escaping the
+    brackets neutralizes that. The TS mirror (safeJson) applies the identical
+    replacement; the golden parity test checks the bytes match."""
+    return (
+        json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+        .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    )
+
+
+_REMINDER_RE = re.compile(r"<system-reminder>[\s\S]*?</system-reminder>\s*", re.IGNORECASE)
+
+
+def _strip_reminder(s: str) -> str:
+    """Strip the CLAUDE.md/date <system-reminder> block the agent prepends to the
+    first user message. It is repo config, not a user turn — leaving it in the
+    classifier transcript would double-inject CLAUDE.md and let stage 2 mistake
+    repo config for in-turn user authorization. CLAUDE.md reaches the classifier
+    only through the dedicated user_claude_md slot."""
+    return _REMINDER_RE.sub("", s).strip()
 
 
 def project_action_for_classifier(tool_name: str, inp: dict) -> str:
@@ -377,10 +412,11 @@ def build_classifier_transcript(history: list, pending: dict) -> str:
                 )
             else:
                 text = ""
+            # Drop the prepended CLAUDE.md/date reminder, then JSON-encode with
+            # angle brackets escaped so hostile content can't forge a line or a
+            # `</transcript>` (see _cjson / _strip_reminder).
+            text = _strip_reminder(text)
             if text.strip():
-                # JSON-encode so hostile user/file content can't forge a JSONL
-                # entry or inject a `</transcript>` that reframes the classifier
-                # (Claude Code stringifies each entry for the same reason).
                 lines.append(_cjson({"user": text.strip()[:2000]}))
         elif role == "assistant":
             # Anthropic: tool_use content blocks. OpenAI: a tool_calls array.
@@ -408,7 +444,7 @@ def build_classifier_transcript(history: list, pending: dict) -> str:
 
 _THINKING_PAIR_RE = re.compile(r"<thinking>[\s\S]*?</thinking>", re.IGNORECASE)
 _THINKING_OPEN_RE = re.compile(r"<thinking>[\s\S]*$", re.IGNORECASE)
-_BLOCK_RE = re.compile(r"^<block>\s*(yes|no)\b\s*(?:</block>)?", re.IGNORECASE)
+_BLOCK_RE = re.compile(r"^<block>\s*(yes|no)\s*</block>", re.IGNORECASE)
 _REASON_RE = re.compile(r"<reason>\s*([\s\S]*?)\s*</reason>", re.IGNORECASE)
 
 
@@ -416,9 +452,11 @@ def parse_block_verdict(raw: str) -> dict:
     """Parse the classifier's <block>yes|no</block><reason>…</reason> reply.
     <thinking>…</thinking> is stripped first (Claude Code's parseXmlBlock does the
     same) so a <thinking><block>no</block></thinking><block>yes</block> reply
-    can't be misread as an allow off the thinking block. Unparseable output
-    blocks for safety (fail-closed) — a reply that doesn't start with a clean
-    verdict is treated as a block, never a pass."""
+    can't be misread as an allow off the thinking block. The FULL closing
+    </block> is required: we don't use stop_sequences, so a well-formed reply
+    always closes the tag — a truncated <block>no is malformed and blocks for
+    safety. Anything that doesn't start with a complete verdict is treated as a
+    block, never a pass (fail-closed)."""
     cleaned = _THINKING_OPEN_RE.sub("", _THINKING_PAIR_RE.sub("", raw)).lstrip()
     bm = _BLOCK_RE.match(cleaned)
     if not bm:
@@ -429,16 +467,16 @@ def parse_block_verdict(raw: str) -> dict:
     return {"block": True, "reason": rm.group(1).strip() if rm else "blocked (no reason given)"}
 
 
-def classifier_user_message(rules: dict, transcript: str, claude_md: str | None = None) -> str:
-    """Single-stage classifier user message: the (untrusted) CLAUDE.md context,
-    the transcript projection, then the block-immediately suffix. CLAUDE.md goes
-    in this USER message, JSON-encoded, so repo content can't break out of the
-    tag or gain system authority. Real Claude Code wraps the transcript in
-    <transcript> and runs two stages; we use one (a teaching approximation)."""
+def classifier_user_message(rules: dict, transcript: str, suffix: str, claude_md: str | None = None) -> str:
+    """Classifier user message: the (untrusted) CLAUDE.md context, the transcript
+    projection, then the stage-specific suffix. CLAUDE.md goes in this USER
+    message, JSON-encoded, so repo content can't break out of the tag or gain
+    system authority. The `suffix` picks the stage (suffix_stage1 for the
+    aggressive gate, suffix_stage2 for the careful adjudication)."""
     cm = ""
     if claude_md and claude_md.strip():
         cm = (
             f"{rules['claude_md_injection']}\n<user_claude_md>\n"
-            f"{json.dumps(claude_md.strip(), ensure_ascii=False)}\n</user_claude_md>\n\n"
+            f"{_cjson(claude_md.strip())}\n</user_claude_md>\n\n"
         )
-    return f"{cm}<transcript>\n{transcript}\n</transcript>\n\n{rules['suffix']}"
+    return f"{cm}<transcript>\n{transcript}\n</transcript>\n\n{suffix}"

@@ -114,11 +114,14 @@ private async classifyToolCall(toolName, input) {
   if (checkPermission(...).action === "deny") return deny;        // hard floor still runs first
   if (AUTO_MODE_FAST_PATH_TOOLS.has(toolName)) return allow;      // read-only tools skip the classifier
   const transcript = buildClassifierTranscript(history, { toolName, input });
-  const raw = await sideQuery(buildClassifierSystem(rules),       // classifier request (temperature 0)
-                             classifierUserMessage(rules, transcript, loadClaudeMd()));
-  const verdict = parseBlockVerdict(raw);                         // unparseable → block
+  const system = buildClassifierSystem(rules);
+  // Stage 1: aggressive cheap gate (temp 0, no intent, block if any rule could apply)
+  const s1 = parseBlockVerdict(await sideQuery(system, userMsg(rules.suffix_stage1)));
+  if (!s1.block) return allow;                                    // stage 1 cleared it → one call, done
+  // Stage 2: careful adjudication (weighs user intent, can clear); its verdict is final
+  const verdict = parseBlockVerdict(await sideQuery(system, userMsg(rules.suffix_stage2)));
   if (verdict.block) { /* count; fall back to human at the limit */ return deny/confirm; }
-  return allow;
+  return allow;                                                   // stage 2 cleared the block on intent
 }
 ```
 
@@ -128,7 +131,7 @@ All three fail-closed branches are shut tight: a classifier error blocks, unpars
 
 ### Where it differs
 
-We build a single-stage classifier; real Claude Code is two-stage (a fast model answers first, and on a block escalates to a thinking model for review). We include only a representative subset of the rule buckets — the full set is ~90+, retrievable with `claude auto-mode defaults`. And there's a batch we don't build, each a separate layer in the real implementation: the GrowthBook-delivered rollout config and circuit breaker, the command-level Bash classifier, and the critique meta-evaluator that reviews the rules you write — all covered in Chapter 18 of how-claude-code-works. Which model the classifier runs on, its thresholds, and whether the server rewrites the prompt are blind spots we can't see.
+We run two stages, the same as real Claude Code's `both` mode: stage 1 is an aggressive cheap gate — it ignores user intent and ALLOW exceptions and blocks if *any* rule could apply (suffix `suffix_stage1`); if stage 1 allows, it's one call and done. Only if stage 1 blocks do we run stage 2's careful adjudication, which *does* weigh the user intent in the transcript and can clear the block (suffix `suffix_stage2`); its verdict is final. Both stages share one system prompt, swapping only the suffix in the user message. Where we differ: we don't reproduce the real client's `stop_sequences` and thinking-token mechanics for the two stages (stage 1 with a smaller max_tokens, stage 2 able to think) — only the "cheap gate first, careful review second" flow. We include only a representative subset of the rule buckets — the full set is ~90+, retrievable with `claude auto-mode defaults`. And there's a batch we don't build, each a separate layer in the real implementation: the GrowthBook-delivered rollout config and circuit breaker, the command-level Bash classifier, and the critique meta-evaluator that reviews the rules you write — all covered in Chapter 18 of how-claude-code-works. Which model the classifier runs on, its thresholds, and whether the server rewrites the prompt are blind spots we can't see.
 
 ## The Three Side by Side
 
@@ -142,7 +145,7 @@ We build a single-stage classifier; real Claude Code is two-stage (a fast model 
 
 ## Honest Boundaries
 
-What's copied verbatim is the client-side prompt text, decision contracts, and tool schemas — the parts extractable directly from the leaked binary. Which model the evaluator and classifier run on, their `effort` level, thresholds, and whether the server rewrites the prompt are blind spots; we don't guess. The teaching simplifications are each labeled: `/goal` uses text parsing instead of a `json_schema` constraint; `/loop` uses an in-session timer instead of the cron engine plus KAIROS, and doesn't touch cloud; Auto Mode is single-stage rather than two, its rule buckets are a subset, and it skips the rollout/circuit-breaker/critique layers. The TS and Python implementations mirror each other, and the behavior described in this chapter is the same on both.
+What's copied verbatim is the client-side prompt text, decision contracts, and tool schemas — the parts extractable directly from the leaked binary. Which model the evaluator and classifier run on, their `effort` level, thresholds, and whether the server rewrites the prompt are blind spots; we don't guess. The teaching simplifications are each labeled: `/goal` uses text parsing instead of a `json_schema` constraint; `/loop` uses an in-session timer instead of the cron engine plus KAIROS, and doesn't touch cloud; Auto Mode runs the two-stage flow but omits the real client's stop-sequence / thinking-token mechanics for the two stages, its rule buckets are a subset, and it skips the rollout/circuit-breaker/critique layers. The TS and Python implementations mirror each other, and the behavior described in this chapter is the same on both.
 
 ## Cross-References
 

@@ -636,6 +636,25 @@ class Agent:
             return resp.choices[0].message.content or "" if resp.choices else ""
         raise RuntimeError("no evaluator model available")
 
+    async def _run_classifier_query(self, system: str, user: str, max_tokens: int) -> str:
+        """Single-message classifier query with a caller-chosen max_tokens, so the
+        two Auto Mode stages can size their budgets differently (stage 1 is a tiny
+        gate, stage 2 has room to think). temperature=0 for a deterministic
+        verdict, matching Claude Code's classifier."""
+        if self._anthropic_client:
+            resp = await self._anthropic_client.messages.create(
+                model=self.model, max_tokens=max_tokens, system=system, temperature=0,
+                messages=[{"role": "user", "content": user}],
+            )
+            return "".join(b.text for b in resp.content if b.type == "text")
+        if self._openai_client:
+            resp = await self._openai_client.chat.completions.create(
+                model=self.model, max_tokens=max_tokens, temperature=0,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            )
+            return resp.choices[0].message.content or "" if resp.choices else ""
+        raise RuntimeError("no classifier model available")
+
     def _extract_last_assistant_text(self) -> str:
         """The text of the most recent assistant turn, for the evaluator to
         judge. Transcript-only: the action under judgement is the latest turn."""
@@ -815,7 +834,13 @@ class Agent:
     async def _classify_tool_call(self, tool_name: str, inp: dict) -> dict:
         """Decide a tool call in Auto Mode. Returns allow/deny like
         check_permission, or "confirm" to hand back to a human once the denial
-        limits trip."""
+        limits trip.
+
+        Two-stage, mirroring Claude Code's `both` mode: stage 1 is an aggressive
+        cheap gate (no user intent, no ALLOW exceptions — block if any rule
+        *could* apply); if stage 1 allows, we're done in one call. If stage 1
+        blocks, stage 2 does the careful adjudication that DOES weigh user intent
+        and can clear the block. Stage 2's verdict is final."""
         # Hard floor first: deny rules bind even here.
         base = check_permission(tool_name, inp, "default", self._plan_file_path)
         if base["action"] == "deny":
@@ -824,8 +849,7 @@ class Agent:
         if tool_name in AUTO_MODE_FAST_PATH_TOOLS:
             return {"action": "allow"}
 
-        sq = self._build_side_query()
-        if not sq:
+        if not self._anthropic_client and not self._openai_client:
             # No evaluator available → fail closed. Defer to a human if present
             # (interactive), else deny outright (headless: CC aborts here).
             return self._auto_fallback(f"{tool_name} (auto-mode classifier unavailable)")
@@ -836,9 +860,17 @@ class Agent:
             system = build_classifier_system(rules)
             # CLAUDE.md rides in the user message, not the system prompt — it is
             # untrusted repo content.
-            user = classifier_user_message(rules, transcript, load_claude_md())
-            raw = await sq(system, user)
-            verdict = parse_block_verdict(raw)
+            claude_md = load_claude_md()
+            # Stage 1 — aggressive cheap gate (small token budget: just <block>…).
+            s1_raw = await self._run_classifier_query(system, classifier_user_message(rules, transcript, rules["suffix_stage1"], claude_md), 256)
+            s1 = parse_block_verdict(s1_raw)
+            if not s1["block"]:
+                verdict = s1  # stage 1 cleared it → allow (one call)
+            else:
+                # Stage 2 — careful adjudication (weighs user intent, can clear).
+                # More tokens: stage 2 may emit a <thinking> block first.
+                s2_raw = await self._run_classifier_query(system, classifier_user_message(rules, transcript, rules["suffix_stage2"], claude_md), 1024)
+                verdict = parse_block_verdict(s2_raw)
         except Exception as e:
             # Any setup or classifier error → fail closed (block), matching CC's
             # iron gate. Wrapping the asset load here keeps a missing/bad rules

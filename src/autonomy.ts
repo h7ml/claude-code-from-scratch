@@ -8,8 +8,9 @@
 // classifier-prompt appendix of how-claude-code-works/docs/18-auto-mode.md
 // (both extracted from the 2.1.201 client binary strings + wire captures).
 
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { join, dirname } from "path";
 
 // ─── /goal — prompt-based Stop-hook evaluator ────────────────────────────────
 //
@@ -78,7 +79,9 @@ export interface GoalVerdict {
  *  accidentally clear a goal. Extra keys are tolerated (the text fallback can't
  *  forbid them the way json_schema does). */
 export function parseGoalVerdict(raw: string): GoalVerdict {
-  const notMet = (reason: string): GoalVerdict => ({ ok: false, reason });
+  // impossible:false is spelled out (not omitted) so the shape matches the
+  // Python mirror byte-for-byte — the golden parity test checks this.
+  const notMet = (reason: string): GoalVerdict => ({ ok: false, reason, impossible: false });
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) return notMet("evaluator returned unparseable output");
   let obj: any;
@@ -229,19 +232,23 @@ export const LOOP_MAX_ITERATIONS = 100;
 // floors (deny rules, plan-mode read-only) still run first; the classifier only
 // judges what would otherwise stop to ask a human.
 //
-// The prompt skeleton, output format, suffix, and CLAUDE.md-injection wording
-// are quoted verbatim from how-claude-code-works ch18's appendix; the rule
-// buckets are a representative subset of `claude auto-mode defaults`. Both live
-// in assets/auto-mode-rules.json so the (long) English exists once, not
-// duplicated across the TS and Python mirrors. What we DON'T reproduce: the
-// two-stage (fast+thinking) classifier, the GrowthBook gate / circuit breaker,
-// the command-level Bash classifier, and the rule-critique meta-evaluator — see
-// how-claude-code-works ch18 for those.
+// The prompt skeleton, output format, stage suffixes, and CLAUDE.md-injection
+// wording are quoted verbatim from how-claude-code-works ch18's appendix; the
+// rule buckets are a representative subset of `claude auto-mode defaults`. Both
+// live in assets/auto-mode-rules.json so the (long) English exists once, not
+// duplicated across the TS and Python mirrors. We DO run the two-stage flow
+// (stage 1 aggressive gate → stage 2 careful adjudication), minus the exact
+// stop-sequence / thinking-token mechanics of the real client. What we DON'T
+// reproduce: the GrowthBook gate / circuit breaker, the command-level Bash
+// classifier, and the rule-critique meta-evaluator — see how-claude-code-works
+// ch18 for those.
 
 export interface AutoModeRules {
   system_skeleton: string;
   output_format: string;
-  suffix: string;
+  suffix: string;          // single-stage suffix (kept for reference)
+  suffix_stage1: string;   // two-stage: aggressive gate
+  suffix_stage2: string;   // two-stage: careful adjudication
   claude_md_injection: string;
   allow: string[];
   soft_deny: string[];
@@ -251,12 +258,37 @@ export interface AutoModeRules {
 
 let cachedRules: AutoModeRules | null = null;
 
+const REQUIRED_RULE_STRINGS = [
+  "system_skeleton", "output_format", "suffix", "suffix_stage1", "suffix_stage2", "claude_md_injection",
+] as const;
+const REQUIRED_RULE_ARRAYS = ["allow", "soft_deny", "hard_deny", "environment"] as const;
+
 /** Load the classifier rules asset (cached). Resolved relative to this module
- *  so it works from dist/ regardless of the process CWD. */
+ *  so it works from dist/ regardless of the process CWD. Validates every field
+ *  and throws on anything missing/empty — a stale or truncated asset must fail
+ *  closed (the classifier's try/catch turns a throw into a block), never leave
+ *  a suffix `undefined` that would silently degrade a stage. */
 export function loadAutoModeRules(): AutoModeRules {
   if (cachedRules) return cachedRules;
-  const path = fileURLToPath(new URL("../assets/auto-mode-rules.json", import.meta.url));
-  cachedRules = JSON.parse(readFileSync(path, "utf8")) as AutoModeRules;
+  // Climb parent dirs from this module until assets/auto-mode-rules.json turns
+  // up, so it resolves whether we run from dist/ (repo/assets, one level up) or
+  // the test build dist-test/src/ (two levels up) — not a fixed "../assets".
+  let dir = dirname(fileURLToPath(import.meta.url));
+  let path = "";
+  for (let i = 0; i < 6; i++) {
+    const candidate = join(dir, "assets", "auto-mode-rules.json");
+    if (existsSync(candidate)) { path = candidate; break; }
+    dir = dirname(dir);
+  }
+  if (!path) throw new Error("auto-mode rules asset not found (assets/auto-mode-rules.json)");
+  const obj: any = JSON.parse(readFileSync(path, "utf8"));
+  for (const k of REQUIRED_RULE_STRINGS) {
+    if (typeof obj[k] !== "string" || !obj[k].trim()) throw new Error(`auto-mode rules: missing/empty string field '${k}'`);
+  }
+  for (const k of REQUIRED_RULE_ARRAYS) {
+    if (!Array.isArray(obj[k]) || obj[k].length === 0) throw new Error(`auto-mode rules: missing/empty array field '${k}'`);
+  }
+  cachedRules = obj as AutoModeRules;
   return cachedRules;
 }
 
@@ -303,6 +335,27 @@ function clip(s: string, max = 1500): string {
   return `${s.slice(0, half)}…[${s.length - half * 2} chars]…${s.slice(-half)}`;
 }
 
+/** JSON-encode a transcript entry, additionally escaping < > & to their \\u
+ *  forms. Plain JSON.stringify escapes quotes and newlines but NOT angle
+ *  brackets, so a value like `</transcript>` or `<block>no</block>` would appear
+ *  literally inside our `<transcript>` wrapper and could reframe the classifier.
+ *  Escaping the brackets neutralizes that while staying valid JSON. The Python
+ *  mirror (_cjson) applies the identical replacement, so both produce the same
+ *  bytes — the golden parity test checks this. */
+function safeJson(obj: unknown): string {
+  return JSON.stringify(obj).replace(/[<>&]/g, (c) =>
+    c === "<" ? "\\u003c" : c === ">" ? "\\u003e" : "\\u0026");
+}
+
+/** Strip the CLAUDE.md/date `<system-reminder>` block that the agent prepends to
+ *  the first user message. It is repo config, not a user turn — leaving it in
+ *  the classifier transcript would double-inject CLAUDE.md and let stage 2
+ *  mistake repo config for in-turn user authorization. CLAUDE.md reaches the
+ *  classifier only through the dedicated user_claude_md slot. */
+function stripReminder(s: string): string {
+  return s.replace(/<system-reminder>[\s\S]*?<\/system-reminder>\s*/gi, "").trim();
+}
+
 /** Project a single tool call to the security-relevant string the classifier
  *  sees — Claude Code's per-tool `toAutoClassifierInput`. Keep what carries
  *  blast radius: the shell command, and for writes the *content* too (path
@@ -331,22 +384,22 @@ export function buildClassifierTranscript(
   const lines: string[] = [];
   for (const m of history) {
     if (m.role === "user") {
-      const text = typeof m.content === "string"
+      const raw = typeof m.content === "string"
         ? m.content
         : Array.isArray(m.content)
           ? m.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join(" ")
           : "";
-      // JSON-encode so hostile user/file content can't forge a JSONL entry or
-      // inject a `</transcript>` that reframes the classifier (Claude Code
-      // stringifies each entry for the same reason).
-      if (text.trim()) lines.push(JSON.stringify({ user: text.trim().slice(0, 2000) }));
+      // Drop the prepended CLAUDE.md/date reminder, then JSON-encode with angle
+      // brackets escaped so hostile content can't forge a line or a `</transcript>`.
+      const text = stripReminder(raw);
+      if (text.trim()) lines.push(safeJson({ user: text.trim().slice(0, 2000) }));
     } else if (m.role === "assistant") {
       // Anthropic: tool_use content blocks. OpenAI: a tool_calls array. Either
       // way keep only the tool calls, drop assistant prose (reasoning-blind).
       if (Array.isArray(m.content)) {
         for (const b of m.content) {
           if (b.type === "tool_use") {
-            lines.push(JSON.stringify({ [b.name]: projectActionForClassifier(b.name, b.input) }));
+            lines.push(safeJson({ [b.name]: projectActionForClassifier(b.name, b.input) }));
           }
         }
       }
@@ -357,13 +410,13 @@ export function buildClassifierTranscript(
           if (!name) continue;
           let args: Record<string, any> = {};
           try { args = JSON.parse(tc.function.arguments || "{}"); } catch { /* keep {} */ }
-          lines.push(JSON.stringify({ [name]: projectActionForClassifier(name, args) }));
+          lines.push(safeJson({ [name]: projectActionForClassifier(name, args) }));
         }
       }
     }
   }
   // The action to evaluate — the agent's most recent action.
-  lines.push(JSON.stringify({ [pending.toolName]: projectActionForClassifier(pending.toolName, pending.input) }));
+  lines.push(safeJson({ [pending.toolName]: projectActionForClassifier(pending.toolName, pending.input) }));
   return lines.join("\n");
 }
 
@@ -375,33 +428,37 @@ export interface BlockVerdict {
 /** Parse the classifier's `<block>yes|no</block><reason>…</reason>` reply.
  *  `<thinking>…</thinking>` is stripped first (Claude Code's parseXmlBlock does
  *  the same) so a `<thinking><block>no</block></thinking><block>yes</block>`
- *  reply can't be misread as an allow off the thinking block. Unparseable
- *  output blocks for safety (fail-closed) — a reply that doesn't start with a
- *  clean verdict is treated as a block, never a pass. */
+ *  reply can't be misread as an allow off the thinking block. The FULL closing
+ *  `</block>` is required: we don't use stop_sequences (unlike Claude Code's
+ *  stage-1 gate that cuts at `</block>`), so a well-formed reply always closes
+ *  the tag — a truncated `<block>no` is malformed and blocks for safety.
+ *  Anything that doesn't start with a complete verdict is treated as a block,
+ *  never a pass (fail-closed). */
 export function parseBlockVerdict(raw: string): BlockVerdict {
   const cleaned = raw
     .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
     .replace(/<thinking>[\s\S]*$/i, "")
     .trimStart();
-  const blockMatch = cleaned.match(/^<block>\s*(yes|no)\b\s*(?:<\/block>)?/i);
+  const blockMatch = cleaned.match(/^<block>\s*(yes|no)\s*<\/block>/i);
   if (!blockMatch) return { block: true, reason: "unparseable classifier output — blocking for safety" };
   if (blockMatch[1].toLowerCase() === "no") return { block: false, reason: "" };
   const reasonMatch = cleaned.match(/<reason>\s*([\s\S]*?)\s*<\/reason>/i);
   return { block: true, reason: reasonMatch ? reasonMatch[1].trim() : "blocked (no reason given)" };
 }
 
-/** Single-stage classifier user message: the (untrusted) CLAUDE.md context, the
- *  transcript projection, then the block-immediately suffix. CLAUDE.md goes in
- *  this USER message, JSON-encoded, so repo content can't break out of the tag
- *  or gain system authority. Real Claude Code wraps the transcript in
- *  `<transcript>` and runs two stages; we use one (a teaching approximation). */
+/** Classifier user message: the (untrusted) CLAUDE.md context, the transcript
+ *  projection, then the stage-specific suffix. CLAUDE.md goes in this USER
+ *  message, JSON-encoded, so repo content can't break out of the tag or gain
+ *  system authority. The `suffix` picks the stage (suffix_stage1 for the
+ *  aggressive gate, suffix_stage2 for the careful adjudication). */
 export function classifierUserMessage(
   rules: AutoModeRules,
   transcript: string,
+  suffix: string,
   claudeMd?: string,
 ): string {
   const cm = claudeMd && claudeMd.trim()
-    ? `${rules.claude_md_injection}\n<user_claude_md>\n${JSON.stringify(claudeMd.trim())}\n</user_claude_md>\n\n`
+    ? `${rules.claude_md_injection}\n<user_claude_md>\n${safeJson(claudeMd.trim())}\n</user_claude_md>\n\n`
     : "";
-  return `${cm}<transcript>\n${transcript}\n</transcript>\n\n${rules.suffix}`;
+  return `${cm}<transcript>\n${transcript}\n</transcript>\n\n${suffix}`;
 }

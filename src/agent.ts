@@ -693,6 +693,30 @@ export class Agent {
     throw new Error("no evaluator model available");
   }
 
+  /** Single-message classifier query with a caller-chosen max_tokens, so the
+   *  two Auto Mode stages can size their budgets differently (stage 1 is a tiny
+   *  gate, stage 2 has room to think). temperature:0 for a deterministic
+   *  verdict, matching Claude Code's classifier. */
+  private async runClassifierQuery(system: string, user: string, maxTokens: number): Promise<string> {
+    if (this.anthropicClient) {
+      const resp = await this.anthropicClient.messages.create({
+        model: this.model, max_tokens: maxTokens, system, temperature: 0,
+        messages: [{ role: "user", content: user }],
+      }, { signal: this.abortController?.signal });
+      return resp.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text).join("");
+    }
+    if (this.openaiClient) {
+      const resp = await this.openaiClient.chat.completions.create({
+        model: this.model, max_tokens: maxTokens, temperature: 0,
+        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+      });
+      return resp.choices?.[0]?.message?.content || "";
+    }
+    throw new Error("no classifier model available");
+  }
+
   /** The text of the most recent assistant turn, for the evaluator to judge.
    *  Transcript-only: real Claude Code feeds the whole transcript but the
    *  action under judgement is the latest turn. */
@@ -873,7 +897,13 @@ export class Agent {
   // judged by an LLM reading a reasoning-blind transcript projection.
 
   /** Decide a tool call in Auto Mode. Returns allow/deny like checkPermission,
-   *  or "confirm" to hand back to a human once the denial limits trip. */
+   *  or "confirm" to hand back to a human once the denial limits trip.
+   *
+   *  Two-stage, mirroring Claude Code's `both` mode: stage 1 is an aggressive
+   *  cheap gate (no user intent, no ALLOW exceptions — block if any rule *could*
+   *  apply); if stage 1 allows, we're done in one call. If stage 1 blocks, stage
+   *  2 does the careful adjudication that DOES weigh user intent and can clear
+   *  the block. Stage 2's verdict is final. */
   private async classifyToolCall(
     toolName: string,
     input: Record<string, any>,
@@ -884,8 +914,7 @@ export class Agent {
     // Fast-path: read-only / side-effect-free tools skip the classifier.
     if (AUTO_MODE_FAST_PATH_TOOLS.has(toolName)) return { action: "allow" };
 
-    const sq = this.buildSideQuery();
-    if (!sq) {
+    if (!this.anthropicClient && !this.openaiClient) {
       // No evaluator available → fail closed. Defer to a human if one is present
       // (interactive), else deny outright (headless: Claude Code aborts here).
       return this.autoFallback(`${toolName} (auto-mode classifier unavailable)`);
@@ -898,9 +927,18 @@ export class Agent {
       const system = buildClassifierSystem(rules);
       // CLAUDE.md rides in the user message, not the system prompt — it is
       // untrusted repo content.
-      const user = classifierUserMessage(rules, transcript, loadClaudeMd());
-      const raw = await sq(system, user, this.abortController?.signal);
-      verdict = parseBlockVerdict(raw);
+      const claudeMd = loadClaudeMd();
+      // Stage 1 — aggressive cheap gate (small token budget: just <block>…).
+      const s1raw = await this.runClassifierQuery(system, classifierUserMessage(rules, transcript, rules.suffix_stage1, claudeMd), 256);
+      const s1 = parseBlockVerdict(s1raw);
+      if (!s1.block) {
+        verdict = s1;                 // stage 1 cleared it → allow (one call)
+      } else {
+        // Stage 2 — careful adjudication (weighs user intent, can clear). More
+        // tokens: stage 2 may emit a <thinking> block before its verdict.
+        const s2raw = await this.runClassifierQuery(system, classifierUserMessage(rules, transcript, rules.suffix_stage2, claudeMd), 1024);
+        verdict = parseBlockVerdict(s2raw);
+      }
     } catch (e: any) {
       // Any setup or classifier error → fail closed (block), matching Claude
       // Code's iron gate. Wrapping the asset load here too keeps a missing/bad
