@@ -1,6 +1,6 @@
 """Agent core loop — dual backend (Anthropic + OpenAI compatible), streaming,
 4-layer compression, plan mode, sub-agents, budget control.
-Mirrors Claude Code's agent architecture."""
+Agent architecture inspired by Claude Code's published design."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ from .ui import (
     stop_spinner,
 )
 from .session import save_session
-from .prompt import build_system_prompt
+from .prompt import build_system_prompt, build_static_system_prompt, build_dynamic_system_context, build_user_context_reminder
 from .subagent import get_sub_agent_config
 from .mcp_client import McpManager
 
@@ -144,6 +144,10 @@ def _to_openai_tools(tools: list[ToolDef]) -> list[dict]:
 SNIPPABLE_TOOLS = {"read_file", "grep_search", "list_files", "run_shell"}
 SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]"
 SNIP_THRESHOLD = 0.60
+# Above this utilization we snip even while the cache is hot: preserving the
+# cache is not worth risking a context overflow. Below it, a hot cache is left
+# untouched (see snip functions). Sits between SNIP_THRESHOLD and autocompact.
+SNIP_HOT_OVERRIDE = 0.75
 MICROCOMPACT_IDLE_S = 5 * 60  # 5 minutes
 KEEP_RECENT_RESULTS = 3
 
@@ -183,6 +187,8 @@ class Agent:
 
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        self.total_cache_read_tokens = 0       # Prompt-cache hits (billed ~0.1x)
+        self.total_cache_creation_tokens = 0   # Prompt-cache writes (billed ~1.25x)
         self.last_input_token_count = 0
         self.current_turns = 0
         self.last_api_call_time = 0.0
@@ -224,8 +230,24 @@ class Agent:
         self._anthropic_messages: list[dict] = []
         self._openai_messages: list[dict] = []
 
-        # Build system prompt
-        self._base_system_prompt = custom_system_prompt or build_system_prompt()
+        # Build system prompt with a static/dynamic split for prefix caching.
+        # A custom system prompt overrides both halves (all of it is treated as
+        # static). Otherwise the static core is cacheable, env/git/skills form
+        # the dynamic tail, and CLAUDE.md + date go into the FIRST user message
+        # as a <system-reminder> (Claude Code's prependUserContext) — see chat.
+        # Keeping project-specific content out of the system maximizes sharing.
+        self._user_context_reminder = ""
+        if custom_system_prompt:
+            self._static_system_prompt = custom_system_prompt
+            self._dynamic_system_context = ""
+        else:
+            self._static_system_prompt = build_static_system_prompt()
+            self._dynamic_system_context = build_dynamic_system_context()
+            self._user_context_reminder = build_user_context_reminder()
+        self._base_system_prompt = (
+            self._static_system_prompt + "\n\n" + self._dynamic_system_context
+            if self._dynamic_system_context else self._static_system_prompt
+        )
         if self.permission_mode == "plan":
             self._plan_file_path = self._generate_plan_file_path()
             self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
@@ -245,6 +267,44 @@ class Agent:
                 kwargs["base_url"] = anthropic_base_url
             self._anthropic_client = anthropic.AsyncAnthropic(**kwargs)
             self._openai_client = None
+
+    # ─── Prefix caching (Anthropic) ─────────────────────────────
+    def _build_anthropic_system(self) -> list[dict]:
+        """Build the `system` field as text blocks with a cache_control
+        breakpoint on the static core. Everything up to and including that block
+        (the tool schemas render before `system`, so they are covered too) is
+        cached server-side; the dynamic tail sits after the breakpoint. This is
+        Claude Code's scope-omitted path. See how-claude-code-works ch3.6."""
+        plan_suffix = self._build_plan_mode_prompt() if self.permission_mode == "plan" else ""
+        dynamic_text = (self._dynamic_system_context + plan_suffix).strip()
+        blocks: list[dict] = [
+            {"type": "text", "text": self._static_system_prompt, "cache_control": {"type": "ephemeral"}}
+        ]
+        if dynamic_text:
+            blocks.append({"type": "text", "text": dynamic_text})
+        return blocks
+
+    def _with_cache_breakpoints(self, messages: list[dict]) -> list[dict]:
+        """Return a COPY of the message list with a cache_control breakpoint on
+        the last message's final content block, so every prior turn stays in the
+        cached prefix and only the newest messages are processed. Pure: the
+        persistent history is never mutated with this API metadata (Claude Code
+        clones request params at the render layer for the same reason, keeping
+        session save / compact / restore clean). Faithful to CC's
+        assistantMessageToMessageParam, we look only at the very LAST block and
+        skip it when it is a thinking block (unstable content → hurts cache
+        hits). Only 1 message breakpoint + 1 system breakpoint per request."""
+        if not messages:
+            return messages
+        out = list(messages)
+        last = out[-1]
+        raw = last.get("content")
+        content = [{"type": "text", "text": raw}] if isinstance(raw, str) else list(raw)
+        tail = content[-1] if content else None
+        if isinstance(tail, dict) and tail.get("type") not in ("thinking", "redacted_thinking"):
+            content[-1] = {**tail, "cache_control": {"type": "ephemeral"}}
+            out[-1] = {**last, "content": content}
+        return out
 
     def _resolve_thinking_mode(self) -> str:
         if not self.thinking:
@@ -383,6 +443,8 @@ class Agent:
             self._openai_messages.append({"role": "system", "content": self._system_prompt})
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        self.total_cache_read_tokens = 0
+        self.total_cache_creation_tokens = 0
         self.last_input_token_count = 0
         print_info("Conversation cleared.")
 
@@ -390,10 +452,25 @@ class Agent:
         total = self._get_current_cost_usd()
         budget_info = f" / ${self.max_cost_usd} budget" if self.max_cost_usd else ""
         turn_info = f" | Turns: {self.current_turns}/{self.max_turns}" if self.max_turns else ""
-        print_info(f"Tokens: {self.total_input_tokens} in / {self.total_output_tokens} out\n  Estimated cost: ${total:.4f}{budget_info}{turn_info}")
+        cached = self.total_cache_read_tokens
+        billed_input = self.total_input_tokens + self.total_cache_creation_tokens + cached
+        hit_rate = round((cached / billed_input) * 100) if billed_input > 0 else 0
+        cache_info = (
+            f"\n  Cache: {cached} read / {self.total_cache_creation_tokens} write ({hit_rate}% of input from cache)"
+            if (cached or self.total_cache_creation_tokens) else ""
+        )
+        print_info(f"Tokens: {self.total_input_tokens} in / {self.total_output_tokens} out{cache_info}\n  Estimated cost: ${total:.4f}{budget_info}{turn_info}")
 
     def _get_current_cost_usd(self) -> float:
-        return (self.total_input_tokens / 1_000_000) * 3 + (self.total_output_tokens / 1_000_000) * 15
+        # Base input $3/Mtok. Cache read is 0.1x, cache write is 1.25x — the
+        # fixed multipliers Claude Code uses across every model tier.
+        M = 1_000_000
+        return (
+            (self.total_input_tokens / M) * 3
+            + (self.total_cache_read_tokens / M) * 0.3
+            + (self.total_cache_creation_tokens / M) * 3.75
+            + (self.total_output_tokens / M) * 15
+        )
 
     def _check_budget(self) -> dict:
         if self.max_cost_usd is not None and self._get_current_cost_usd() >= self.max_cost_usd:
@@ -538,7 +615,17 @@ class Agent:
 
     # Tier 2: Snip stale results
     def _snip_stale_results_anthropic(self) -> None:
+        # Cache-aware gate (mirrors Claude Code's cached-microcompact split):
+        # while the prompt cache is still hot, rewriting an old tool_result in
+        # place would invalidate the entire cached message prefix. Claude Code
+        # prunes hot caches via a cache_edits API call unavailable on the public
+        # API, so we leave the hot prefix alone — UNTIL utilization is high
+        # enough (SNIP_HOT_OVERRIDE) that risking an overflow costs more than one
+        # cache rebuild. Below that we wait for the cache to go cold.
         utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
+        cache_hot = self.last_api_call_time > 0 and (time.time() - self.last_api_call_time) < MICROCOMPACT_IDLE_S
+        if cache_hot and utilization < SNIP_HOT_OVERRIDE:
+            return
         if utilization < SNIP_THRESHOLD:
             return
 
@@ -576,7 +663,13 @@ class Agent:
             self._anthropic_messages[r["mi"]]["content"][r["bi"]]["content"] = SNIP_PLACEHOLDER
 
     def _snip_stale_results_openai(self) -> None:
+        # Cache-aware gate — see _snip_stale_results_anthropic. OpenAI-compatible
+        # providers cache prefixes automatically, so the same "don't rewrite a
+        # hot prefix (unless utilization is high)" rule applies.
         utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
+        cache_hot = self.last_api_call_time > 0 and (time.time() - self.last_api_call_time) < MICROCOMPACT_IDLE_S
+        if cache_hot and utilization < SNIP_HOT_OVERRIDE:
+            return
         if utilization < SNIP_THRESHOLD:
             return
         tool_msgs = []
@@ -899,8 +992,33 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 self._already_surfaced_memories, self._session_memory_bytes,
             )
 
+    def _push_anthropic_user_message(self, content: str) -> None:
+        """Push a user message, prepending the CLAUDE.md/date <system-reminder>
+        when it is the first user message of a (possibly just-cleared) context —
+        Claude Code's prependUserContext, kept out of the cached system prompt.
+        Embedded in the user message rather than a standalone message to preserve
+        user/assistant alternation. Also used by the plan clear-and-execute path,
+        which rebuilds history from empty."""
+        if not self._anthropic_messages and self._user_context_reminder:
+            self._anthropic_messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": self._user_context_reminder},
+                    {"type": "text", "text": content},
+                ],
+            })
+        else:
+            self._anthropic_messages.append({"role": "user", "content": content})
+
+    def _push_openai_user_message(self, content: str) -> None:
+        is_first_user = not any(m.get("role") == "user" for m in self._openai_messages)
+        if is_first_user and self._user_context_reminder:
+            self._openai_messages.append({"role": "user", "content": f"{self._user_context_reminder}\n\n{content}"})
+        else:
+            self._openai_messages.append({"role": "user", "content": content})
+
     async def _chat_anthropic(self, user_message: str) -> None:
-        self._anthropic_messages.append({"role": "user", "content": user_message})
+        self._push_anthropic_user_message(user_message)
         # Auto-compact at turn boundary only — the last message is now plain
         # user text, so the slice in _compact_anthropic won't sever a
         # tool_use ↔ tool_result pair from the previous turn's tool execution.
@@ -940,9 +1058,21 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 stop_spinner()
 
             self.last_api_call_time = time.time()
+            # Anthropic reports cached tokens separately: `input_tokens` counts
+            # only the uncached prefix, while cache_read/cache_creation are
+            # billed at 0.1x/1.25x. Track them apart for cost.
+            cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+            cache_creation = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
             self.total_input_tokens += response.usage.input_tokens
+            self.total_cache_read_tokens += cache_read
+            self.total_cache_creation_tokens += cache_creation
             self.total_output_tokens += response.usage.output_tokens
-            self.last_input_token_count = response.usage.input_tokens
+            # Estimate next-turn context size for the compaction gauge: the full
+            # prompt we just sent (input + cache_read + cache_creation) plus the
+            # output we just generated, which becomes part of the next request.
+            self.last_input_token_count = (
+                response.usage.input_tokens + cache_read + cache_creation + response.usage.output_tokens
+            )
 
             tool_uses = [b for b in response.content if b.type == "tool_use"]
 
@@ -953,7 +1083,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
             if not tool_uses:
                 if not self.is_sub_agent:
-                    print_cost(self.total_input_tokens, self.total_output_tokens)
+                    print_cost(self.total_input_tokens, self.total_output_tokens, self.total_cache_read_tokens, self.total_cache_creation_tokens)
                 break
 
             self.current_turns += 1
@@ -1010,7 +1140,9 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
                 if self._context_cleared:
                     self._context_cleared = False
-                    self._anthropic_messages.append({"role": "user", "content": res})
+                    # History was just cleared — route through the helper so the
+                    # rebuilt context's first user message carries the reminder.
+                    self._push_anthropic_user_message(res)
                     context_break = True
                     break
                 tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": res})
@@ -1033,15 +1165,17 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
         """Stream an Anthropic API call. When a tool_use content block finishes
         during streaming, on_tool_block_complete fires immediately so the caller
         can start execution before the full response arrives (streaming tool
-        execution -- mirrors Claude Code's content_block_stop approach)."""
+        execution -- inspired by Claude Code's content_block_stop streaming pattern)."""
         async def _do():
             max_output = _get_max_output_tokens(self.model)
             create_params: dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": max_output if self._thinking_mode != "disabled" else 16384,
-                "system": self._system_prompt,
+                "system": self._build_anthropic_system(),
                 "tools": get_active_tool_definitions(self.tools),
-                "messages": self._anthropic_messages,
+                # Rolling message-array cache breakpoint, applied to a copy so
+                # the persistent history stays free of cache_control metadata.
+                "messages": self._with_cache_breakpoints(self._anthropic_messages),
             }
 
             if self._thinking_mode in ("adaptive", "enabled"):
@@ -1106,7 +1240,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
     # ─── OpenAI-compatible backend ───────────────────────────────
 
     async def _chat_openai(self, user_message: str) -> None:
-        self._openai_messages.append({"role": "user", "content": user_message})
+        self._push_openai_user_message(user_message)
         # Auto-compact at turn boundary only — see _chat_anthropic for rationale.
         # The last message is now plain user text, so the slice in
         # _compact_openai won't orphan a tool_calls / tool message pair.
@@ -1135,9 +1269,22 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             self.last_api_call_time = time.time()
 
             if response.get("usage"):
-                self.total_input_tokens += response["usage"]["prompt_tokens"]
-                self.total_output_tokens += response["usage"]["completion_tokens"]
-                self.last_input_token_count = response["usage"]["prompt_tokens"]
+                # OpenAI-compatible providers cache prefixes automatically; the
+                # cached portion is included in prompt_tokens, so split it out to
+                # avoid double-counting. Clamp to [0, prompt_tokens] since
+                # compatible gateways don't guarantee the field. NOTE: priced at
+                # Anthropic's 0.1x for simplicity; actual cached rates vary by
+                # provider (OpenAI ~0.5x, gateways vary), so the estimate may be
+                # off in either direction.
+                prompt = response["usage"]["prompt_tokens"] or 0
+                cached_oa = min(max(response["usage"].get("cached_tokens", 0) or 0, 0), prompt)
+                completion = response["usage"]["completion_tokens"]
+                self.total_input_tokens += prompt - cached_oa
+                self.total_cache_read_tokens += cached_oa
+                self.total_output_tokens += completion
+                # Estimate next-turn context size: this prompt + the output we
+                # just generated (which becomes part of the next request).
+                self.last_input_token_count = prompt + completion
 
             choice = response.get("choices", [{}])[0] if response.get("choices") else {}
             message = choice.get("message", {})
@@ -1147,7 +1294,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             tool_calls = message.get("tool_calls")
             if not tool_calls:
                 if not self.is_sub_agent:
-                    print_cost(self.total_input_tokens, self.total_output_tokens)
+                    print_cost(self.total_input_tokens, self.total_output_tokens, self.total_cache_read_tokens, self.total_cache_creation_tokens)
                 break
 
             self.current_turns += 1
@@ -1228,7 +1375,9 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
                         if self._context_cleared:
                             self._context_cleared = False
-                            self._openai_messages.append({"role": "user", "content": res})
+                            # History was just cleared — route through the helper
+                            # so the first user message carries the reminder.
+                            self._push_openai_user_message(res)
                             oai_context_break = True
                             break
                         self._openai_messages.append({"role": "tool", "tool_call_id": ct["tc"]["id"], "content": res})
@@ -1254,9 +1403,11 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
             async for chunk in stream:
                 if chunk.usage:
+                    details = getattr(chunk.usage, "prompt_tokens_details", None)
                     usage = {
                         "prompt_tokens": chunk.usage.prompt_tokens,
                         "completion_tokens": chunk.usage.completion_tokens,
+                        "cached_tokens": getattr(details, "cached_tokens", 0) or 0,
                     }
 
                 if not chunk.choices:

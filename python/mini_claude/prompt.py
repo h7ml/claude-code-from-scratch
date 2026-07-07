@@ -84,19 +84,7 @@ Focus text output on:
 - High-level status updates at natural milestones
 - Errors or blockers that change the plan
 
-If you can say it in one sentence, don't use three. Prefer short, direct sentences over long explanations. This does not apply to code or tool calls.
-
-# Environment
-Working directory: {{cwd}}
-Date: {{date}}
-Platform: {{platform}}
-Shell: {{shell}}
-{{git_context}}
-{{claude_md}}
-{{memory}}
-{{skills}}
-{{agents}}
-{{deferred_tools}}"""
+If you can say it in one sentence, don't use three. Prefer short, direct sentences over long explanations. This does not apply to code or tool calls."""
 
 
 import re as _re
@@ -207,14 +195,30 @@ def get_git_context() -> str:
         return ""
 
 
-def build_system_prompt() -> str:
-    """Build the full system prompt from embedded template + dynamic context."""
-    from datetime import date
-    today = date.today().isoformat()
+# ─── Static / dynamic split for prefix caching ───────────────
+# Claude Code splits the system prompt at a static/dynamic boundary so the
+# static half (identical for every user and every session) can sit behind a
+# cache_control breakpoint, while volatile per-session context lives after
+# the boundary or in the message array. We mirror that split here: the
+# template above is the static core; env/git/memory/skills are the dynamic
+# tail; CLAUDE.md + date are pushed into a <system-reminder> message (see
+# build_user_context_reminder) that the agent injects into the FIRST user
+# message — Claude Code's prependUserContext. See how-claude-code-works ch3.6
+# "前缀缓存策略".
+
+
+def build_static_system_prompt() -> str:
+    """The all-users-identical core. Never changes between users or sessions,
+    so it is the block we mark with cache_control."""
+    return SYSTEM_PROMPT_TEMPLATE
+
+
+def build_dynamic_system_context() -> str:
+    """Per-session context: stable within a session but varies by
+    machine/project, so it stays uncached. Kept OUT of the static block."""
     plat = f"{platform.system()} {platform.machine()}"
     shell = (os.environ.get("ComSpec") or "cmd.exe") if sys.platform == "win32" else os.environ.get("SHELL", "/bin/sh")
     git_context = get_git_context()
-    claude_md = load_claude_md()
     memory_section = build_memory_prompt_section()
     skills_section = build_skill_descriptions()
     agent_section = build_agent_descriptions()
@@ -225,19 +229,38 @@ def build_system_prompt() -> str:
         if deferred_names else ""
     )
 
-    replacements = {
-        "{{cwd}}": str(Path.cwd()),
-        "{{date}}": today,
-        "{{platform}}": plat,
-        "{{shell}}": shell,
-        "{{git_context}}": git_context,
-        "{{claude_md}}": claude_md,
-        "{{memory}}": memory_section,
-        "{{skills}}": skills_section,
-        "{{agents}}": agent_section,
-        "{{deferred_tools}}": deferred_section,
-    }
-    result = SYSTEM_PROMPT_TEMPLATE
-    for key, value in replacements.items():
-        result = result.replace(key, value)
-    return result
+    return (
+        f"# Environment\n"
+        f"Working directory: {Path.cwd()}\n"
+        f"Platform: {plat}\n"
+        f"Shell: {shell}"
+        f"{git_context}{memory_section}{skills_section}{agent_section}{deferred_section}"
+    )
+
+
+def build_user_context_reminder() -> str:
+    """CLAUDE.md + date, wrapped in <system-reminder>. Project-specific content
+    here would fragment the system prompt cache, so it must stay out of the
+    cached static block. Like Claude Code's prependUserContext, the agent
+    injects this into the first user message of the conversation."""
+    from datetime import date
+    today = date.today().isoformat()
+    claude_md = load_claude_md()
+    claude_md_section = f"\n{claude_md}\n" if claude_md else ""
+    return (
+        "<system-reminder>\n"
+        "As you answer the user's questions, you can use the following context:"
+        f"{claude_md_section}\n"
+        "# currentDate\n"
+        f"Today's date is {today}.\n\n"
+        "IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n"
+        "</system-reminder>"
+    )
+
+
+def build_system_prompt() -> str:
+    """Combined static + dynamic prompt as a single string. Used by the
+    OpenAI-compatible backend (which relies on the provider's automatic prefix
+    caching) and as a fallback; the Anthropic backend uses the split blocks
+    above so it can place its own cache_control breakpoint."""
+    return f"{build_static_system_prompt()}\n\n{build_dynamic_system_context()}"

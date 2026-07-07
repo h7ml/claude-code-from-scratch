@@ -1,5 +1,8 @@
 # 13. Architecture Comparison and What's Next
 
+> ℹ️ **About the comparison tables in this chapter**: The "Architecture Comparison" and "File Mapping" below are meant to help readers build a conceptual correspondence between **our ~4,300-line minimal implementation** and **a production-grade coding agent like Claude Code**.
+> This project is an **independent clean-room educational implementation** -- the code does not come from Claude Code's internal implementation, and all comparisons are analogies for learning and further research only. Specific details may differ from Claude Code's real internals.
+
 ## Full Architecture Comparison
 
 | Component | Claude Code | mini-claude | Difference |
@@ -8,7 +11,7 @@
 | **Tool count** | 66+ tools | 13 tools (6 core + web_fetch + tool_search + skill + agent + 2 plan mode) | Removed specialized tools |
 | **Tool execution** | Concurrent execution + streaming early start | Parallel execution + streaming early start | Architecture aligned |
 | **API backend** | Anthropic only | Anthropic + OpenAI compatible | Added OpenAI |
-| **System Prompt** | static/dynamic split + API caching | No cache optimization | Removed caching |
+| **System Prompt** | static/dynamic split + API caching | static/dynamic split + cache_control breakpoint | Architecture aligned |
 | **Permission system** | 7 layers + AST analysis + 8-level rule sources | 5 modes + rule config + regex + confirmation | Layer alignment |
 | **Context management** | 4-level compression pipeline | 4 layers (budget + snip + microcompact + summary) | Architecture aligned |
 | **Memory system** | 4 types + semantic recall + MEMORY.md index | 4 types + semantic recall + MEMORY.md + async prefetch | Architecture aligned |
@@ -53,12 +56,6 @@ LSP gives the agent millisecond-level type error feedback after editing files, w
 
 Why we didn't implement it: Requires managing LSP server processes, implementing the client protocol (initialization handshake, capability negotiation, incremental sync) -- 1000+ lines and depends on deep understanding of the LSP protocol. Getting error feedback through shell commands (`tsc --noEmit`, `python -m py_compile`) is sufficient for tutorial scenarios.
 
-### Prompt Caching
-
-The Anthropic API supports caching system prompts -- Claude Code puts the unchanging parts (role definition, tool specs) first and the changing parts (git status, current file) last. Cache hits can reduce input token cost by 90%.
-
-Why we didn't implement it: The code change is minimal (20-30 lines), but requires careful design of the prompt partitioning strategy. If your agent is going to production, this should be the first optimization you add.
-
 ### Bash AST Security Analysis
 
 Claude Code uses tree-sitter to parse shell command ASTs, performing 23 static security checks that can analyze dangerous commands within pipe combinations -- something pure regex can't do.
@@ -67,13 +64,9 @@ Why we didn't implement it: tree-sitter is a native C/C++ library requiring a `n
 
 ## Progressive Enhancement Roadmap
 
-### Phase 1: Performance and Cost Optimization (1-2 days)
+### Phase 1: Prefix Caching (Done)
 
-| Enhancement | Problem Solved | Estimated Code |
-|-------------|---------------|----------------|
-| Prompt Caching | Wasted tokens resending system prompt | ~30 lines |
-
-**Prompt Caching** is the optimization with the best return on investment: add `cache_control: { type: "ephemeral" }` markers to the static portions of the system prompt, saving 50%+ input token cost across multi-turn conversations.
+Prompt Caching has now been added the way Claude Code does it; details are in [Chapter 7: Prefix Caching](/en/docs/07-context.md). The approach marks the static portion of the system prompt with `cache_control: { type: "ephemeral" }` and rolls a breakpoint onto the last message; a cache-hit prefix is billed at 0.1x. From the second turn onward in a multi-turn conversation, the accumulated system prompt, tool definitions, and history messages are mostly read from cache, and only the newest increment needs to be reprocessed.
 
 ### Phase 2: Extensibility (3-5 days)
 

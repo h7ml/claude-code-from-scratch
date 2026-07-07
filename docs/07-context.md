@@ -62,7 +62,7 @@ graph TD
 
 **Token 估算**从不调用额外 API：用最近一次 API 返回的 `usage` 作为锚点，新增消息用字符数 / 4 粗估。误差从纯估算的 30%+ 降到 <5%。
 
-**Prompt 缓存**脆弱性在于前缀中任何字节变化都会导致失效。Claude Code 在多个层面维护稳定性：静态/动态边界标记、beta header 粘性锁存（一旦发送就持续出现，不随 feature flag 变化）、工具数组末尾打缓存断点、以及断裂检测（`cache_read_input_tokens` 下降 >5% 时自动归因）。
+**Prompt 缓存**脆弱性在于前缀中任何字节变化都会导致失效。Claude Code 在多个层面维护稳定性：静态/动态边界标记、beta header 粘性锁存（一旦发送就持续出现，不随 feature flag 变化）、system 静态块与最后一条消息两处缓存断点（工具数组渲染在 system 之前，随其断点一并缓存）、以及断裂检测（`cache_read_input_tokens` 下降 >5% 时自动归因）。
 
 **熔断器**：曾有会话连续 autocompact 失败 3,272 次，浪费大量 API 调用。现在连续 3 次失败后直接停止重试。
 
@@ -457,19 +457,30 @@ async def _compact_openai(self) -> None:
 <!-- tabs:start -->
 #### **TypeScript**
 ```typescript
-this.totalInputTokens += response.usage.input_tokens;
+const cacheRead = (response.usage as any).cache_read_input_tokens || 0;
+const cacheCreation = (response.usage as any).cache_creation_input_tokens || 0;
+this.totalInputTokens += response.usage.input_tokens;   // 只是未缓存部分
+this.totalCacheReadTokens += cacheRead;
+this.totalCacheCreationTokens += cacheCreation;
 this.totalOutputTokens += response.usage.output_tokens;
-this.lastInputTokenCount = response.usage.input_tokens;
+this.lastInputTokenCount =
+  response.usage.input_tokens + cacheRead + cacheCreation + response.usage.output_tokens;
 ```
 #### **Python**
 ```python
-self.total_input_tokens += response.usage.input_tokens
+cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+cache_creation = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+self.total_input_tokens += response.usage.input_tokens   # 只是未缓存部分
+self.total_cache_read_tokens += cache_read
+self.total_cache_creation_tokens += cache_creation
 self.total_output_tokens += response.usage.output_tokens
-self.last_input_token_count = response.usage.input_tokens
+self.last_input_token_count = (
+    response.usage.input_tokens + cache_read + cache_creation + response.usage.output_tokens
+)
 ```
 <!-- tabs:end -->
 
-`lastInputTokenCount` 用于判断是否接近窗口上限；`totalInputTokens` 累计所有调用用于费用估算。我们直接用 API 返回值，比 Claude Code 的锚点+估算方案简单，够用。
+开了缓存后 `input_tokens` 只剩未命中的那点，所以 `lastInputTokenCount`（用来判断是否接近窗口上限）得把三类输入 token 加回来，再带上本轮 output——它下一轮会变成 prompt 的一部分。`totalInputTokens` 与 cache read/write 分开累计，费用估算见「前缀缓存」一节。
 
 4 层在每次 API 调用前顺序执行：
 
@@ -498,15 +509,72 @@ def _run_compression_pipeline(self) -> None:
 
 Tier 1-3 在每次 API 调用**前**运行（零 API 成本），Tier 4 在 **turn boundary 触发**——即每次用户输入 push 进消息数组后、`while` 主循环开始前。**不要**把 Tier 4 放在 tool 循环末尾：那时最后一条消息是 `{role: "user", content: [tool_result, ...]}`，`compactAnthropic` 内部的 `slice(0, -1)` 会切断它与前一条 `assistant` 消息里 `tool_use` 的配对，Anthropic API 会以 *"tool_use ids were found without tool_result blocks immediately after"* 拒绝那次 summarize 请求。`lastInputTokenCount` 在新位置仍然有效——它反映上一轮最后一次 API call 的状态，足以判断是否触发。顺序也有意义：Budget 先压缩大结果，让 Snip 的去重判断更准确，Microcompact 最后在时间条件满足时无差别清理。
 
+## 前缀缓存
+
+前面几层管的是"上下文太大怎么缩"，这一节管的是另一件事：同样一段前缀，怎么让服务端别每轮都重新算一遍。早期版本没做缓存，每轮都把完整的系统提示词、工具定义和不断增长的历史当全新输入发出去、全价计费——一次请求光前缀就有五千多个 token 被反复重算。补上缓存后，多轮对话里第二轮起这部分基本免费。
+
+Claude Code 的完整做法在[第 3 章](https://windy3f3f3f3f.github.io/how-claude-code-works/#/docs/03-context-engineering)讲得很细，这里说我们照着搬了哪些、哪些搬不动。
+
+### 两个缓存断点
+
+Anthropic 的缓存不会凭空发生——请求里没有任何 `cache_control`，就一点都不缓存、全价计费。开启方式有两种：像 Claude Code 一样显式打块级断点，或用 2026 年初上线的顶层 automatic caching（请求顶层放一个 `cache_control` 字段，系统自动放置并推进断点）。我们照 Claude Code 的做法走显式断点，打两个：
+
+第一个在系统提示词上。`buildAnthropicSystem` 把 `system` 从一个字符串拆成两个 text block——静态核心（所有会话都一样的角色、规则、工具说明）标 `cache_control`，动态尾巴（环境、git、技能列表）跟在后面不标。工具数组不用单独打断点：API 的渲染顺序是 `tools → system → messages`，标在静态 system 块上，前面的工具定义就一并缓存了。
+
+第二个断点滚动地打在最后一条消息上。`withCacheBreakpoints` 每次请求前给消息数组末条的最后一个内容块标 `cache_control`，这样上一轮及更早的消息全部落在缓存前缀里，只有本轮新增的部分需要重新处理。它是个纯函数，返回一份改过的副本、不动原始历史——否则 `cache_control` 这种请求元数据会被写进会话存档和摘要请求。跳过 `thinking` 块是因为它们内容不稳定，标在上面反而降低命中率。
+
+<!-- tabs:start -->
+#### **TypeScript**
+```typescript
+private buildAnthropicSystem(): Anthropic.TextBlockParam[] {
+  const blocks: Anthropic.TextBlockParam[] = [
+    { type: "text", text: this.staticSystemPrompt, cache_control: { type: "ephemeral" } },
+  ];
+  if (dynamicText) blocks.push({ type: "text", text: dynamicText });
+  return blocks;
+}
+```
+#### **Python**
+```python
+def _build_anthropic_system(self) -> list[dict]:
+    blocks = [{"type": "text", "text": self._static_system_prompt,
+               "cache_control": {"type": "ephemeral"}}]
+    if dynamic_text:
+        blocks.append({"type": "text", "text": dynamic_text})
+    return blocks
+```
+<!-- tabs:end -->
+
+CLAUDE.md 和日期没放进系统提示词，而是包成 `<system-reminder>` 塞进第一条 user 消息（Claude Code 的 `prependUserContext`）。这些内容因项目而异，留在系统提示词里会让缓存的静态块变得每个项目一份，白占缓存。
+
+### 两处只能近似
+
+Claude Code 有两样东西是 Anthropic 第一方的内部能力，公开 API 给不了，我们只能近似，并在这里讲清楚：
+
+一是 `scope: 'global'` 跨用户共享。Claude Code 的静态系统提示词全球用户共享同一份缓存。公开 API 没有这个参数——省略它就落回公开 API 的默认隔离范围（按当前官方文档是 workspace / 组织一级），而这恰好和 Claude Code 装了 MCP、无法全局共享时走的那条 fallback 路径字节一致，所以谈不上偏离，只是共享范围小一圈。
+
+二是 `cache_edits` 热缓存就地删除。第 3 章讲过 microcompact 有冷、热两条路径：缓存冷时直接改消息，缓存热时用 `cache_edits` 让服务端在缓存里删旧结果、不动本地消息。热路径靠的是内部 API——连泄露的源码里这段都被剥掉了。我们没有这条路，于是退一步：缓存热的时候干脆不改历史。反正命中的前缀按 0.1× 计费，重发旧结果本来就便宜，不删也不亏多少。
+
+### 缓存和压缩会打架
+
+这一步是上面第 2 层 Snip 里那个"缓存热度门"的由来。Snip 会原地改写旧的工具结果，可只要动了已经缓存的前缀，从那条消息往后的缓存全部作废。所以 Snip 现在先看缓存热不热：还热、而且利用率不高（低于 75%）时就不动它，等缓存自己过期再清；一旦利用率顶到 75% 以上，宁可破一次缓存也得把窗口腾出来，免得撑到更贵的 auto-compact。换句话说，激进裁剪和前缀缓存本是一对矛盾——真开了缓存，反而不需要裁得那么狠。
+
+### 花销怎么算
+
+命中缓存的 token 不按全价算：读缓存是 0.1×、写缓存是 1.25×，和 Claude Code 的 `modelCost.ts` 定倍率一致。`getCurrentCostUsd` 把这三类 token 分开计价，`/cost` 顺带报一个命中率。OpenAI 兼容后端不用标 `cache_control`——provider 自动缓存前缀，命中的部分在 `prompt_tokens_details.cached_tokens` 里，我们把它从 `prompt_tokens` 拆出来单算。计价上统一按 Anthropic 的 0.1× 近似；实际倍率因 provider 而异（OpenAI 官方约 0.5×，兼容网关不保证），这条路的估算可能偏高也可能偏低。
+
+真机验证过一遍：连着两轮各发一句话，第一轮 `cache_creation` 五千多、`cache_read` 为零（冷启动、写缓存），第二轮 `cache_read` 补上、几乎等于第一轮写进去的量（命中了）。TS 和 Python 两版数字基本一致。
+
 ## 简化对比
 
 | 维度 | Claude Code | mini-claude |
 |------|------------|-------------|
 | **压缩层级** | 5 级流水线 | 4 层（budget + snip + microcompact + 摘要） |
-| **Token 计数** | 锚点+粗估，不额外调 API | 直接用 API 返回的 input_tokens |
+| **Token 计数** | 锚点+粗估，不额外调 API | 直接用 API 返回值，cache read/write 分开计价 |
 | **Budget 触发** | 基于剩余预算 | 50%/70% 双阈值 |
-| **Snip 策略** | 选择性裁剪 + cache 感知 | 同文件去重 + 保留最近 3 个 |
+| **Snip 策略** | 选择性裁剪 + cache 感知 | 同文件去重 + 保留最近 3 个 + 缓存热度门 |
 | **Microcompact** | 时间路径 + 缓存编辑路径 | 只有 5 分钟空闲触发 |
+| **前缀缓存** | 2 显式断点（tools 随 system 覆盖）+ scope:global + 断裂检测 | 2 断点（system + 末条消息），scope 走默认（workspace 级） |
 | **Auto-compact** | 两阶段摘要 + 压缩后恢复 + 熔断器 | 单段摘要，无恢复 |
 | **溢出存储** | 磁盘持久化，可按需读取 | 磁盘持久化（>30KB），可按需读取 |
 

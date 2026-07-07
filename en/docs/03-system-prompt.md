@@ -6,18 +6,20 @@ Construct a System Prompt that turns an LLM into a competent coding agent: telli
 
 ```mermaid
 graph TB
-    Template[SYSTEM_PROMPT_TEMPLATE<br/>Inline Markdown Template] --> Builder[buildSystemPrompt<br/>Variable Substitution]
-    CWD[Working Directory] --> Builder
-    Git[Git Info] --> Builder
-    ClaudeMD[CLAUDE.md<br/>Project Instructions] --> Builder
-    Memory[Memory System] --> Builder
-    Skills[Skills Descriptions] --> Builder
-    Agents[Agent Descriptions] --> Builder
-    Builder --> Final[Final System Prompt]
-    Final --> API[Passed to API<br/>system parameter]
+    Template[SYSTEM_PROMPT_TEMPLATE<br/>Inline Markdown Template] --> Static[Static core<br/>cached via cache_control]
+    CWD[Working Directory] --> Dynamic[buildDynamicSystemContext<br/>dynamic block]
+    Git[Git Info] --> Dynamic
+    Memory[Memory System] --> Dynamic
+    Skills[Skills Descriptions] --> Dynamic
+    Agents[Agent Descriptions] --> Dynamic
+    Static --> API[Passed to API<br/>system parameter]
+    Dynamic --> API
+    ClaudeMD[CLAUDE.md + date] --> Reminder[buildUserContextReminder<br/>system-reminder]
+    Reminder --> FirstMsg[Injected into first user message]
 
-    style Builder fill:#7c5cfc,color:#fff
-    style Final fill:#e8e0ff
+    style Static fill:#7c5cfc,color:#fff
+    style Dynamic fill:#e8e0ff
+    style Reminder fill:#e8e0ff
 ```
 
 ## How Claude Code Does It
@@ -89,7 +91,7 @@ Files closer to CWD are **loaded later with higher priority** -- leveraging the 
 
 ### SYSTEM_PROMPT_TEMPLATE
 
-The template is inline in `prompt.ts`, using `{{placeholder}}` to mark dynamic variables:
+The template is inline in `prompt.ts`. It IS the static core — no interpolation at all, byte-identical across sessions, which is exactly what makes it cacheable:
 
 ```typescript
 const SYSTEM_PROMPT_TEMPLATE = `You are Mini Claude Code, a lightweight coding assistant CLI.
@@ -134,19 +136,10 @@ User approving an action once does NOT mean they approve it in all contexts.
 IMPORTANT: Go straight to the point. Lead with conclusions, reasoning after.
 Skip filler phrases. One sentence where one sentence suffices.
 
-# Environment
-Working directory: {{cwd}}
-Date: {{date}}
-Platform: {{platform}}
-Shell: {{shell}}
-{{git_context}}
-{{claude_md}}
-{{memory}}
-{{skills}}
-{{agents}}`;
+If you can say it in one sentence, don't use three. ...`;
 ```
 
-`{{memory}}`, `{{skills}}`, `{{agents}}` are placed at the end -- recency bias gives these dynamic contents higher weight (see Chapters 8 and 9 for details).
+The template ends here -- it contains only the **static core**: the role definition, rules, and tool descriptions that are exactly the same for every user and every session. Environment context (cwd, platform, shell, git status, memory, skills, agent list) is built separately by `buildDynamicSystemContext()` as the dynamic block that follows the static one; CLAUDE.md and the current date are wrapped in a `<system-reminder>` and injected into the first user message. This split makes way for prefix caching: once the static core is marked `cache_control`, it stays byte-identical across sessions and hits reliably, and project-specific content doesn't pollute it (see [Chapter 7: Prefix Caching](07-context.md)). Memory, skills, and the agent list sit at the end of the dynamic block -- recency bias gives these contents higher weight (see Chapters 8 and 9 for details).
 
 ### prompt.ts Implementation
 
@@ -200,23 +193,28 @@ export function getGitContext(): string {
   }
 }
 
-export function buildSystemPrompt(): string {
-  const date = new Date().toISOString().split("T")[0];
+// Static core: return the template as-is, no interpolation -- this is the block cached via cache_control
+export function buildStaticSystemPrompt(): string {
+  return SYSTEM_PROMPT_TEMPLATE;
+}
+
+// Dynamic block: environment + git + memory + skills + agent list; stable within a session but varies by machine/project
+export function buildDynamicSystemContext(): string {
   const platform = `${os.platform()} ${os.arch()}`;
   const shell = process.platform === "win32"
     ? (process.env.ComSpec || "cmd.exe")
     : (process.env.SHELL || "/bin/sh");
+  return `# Environment
+Working directory: ${process.cwd()}
+Platform: ${platform}
+Shell: ${shell}${getGitContext()}${buildMemoryPromptSection()}${buildSkillDescriptions()}${buildAgentDescriptions()}`;
+}
 
-  return SYSTEM_PROMPT_TEMPLATE
-    .split("{{cwd}}").join(process.cwd())
-    .split("{{date}}").join(date)
-    .split("{{platform}}").join(platform)
-    .split("{{shell}}").join(shell)
-    .split("{{git_context}}").join(getGitContext())
-    .split("{{claude_md}}").join(loadClaudeMd())
-    .split("{{memory}}").join(buildMemoryPromptSection())
-    .split("{{skills}}").join(buildSkillDescriptions())
-    .split("{{agents}}").join(buildAgentDescriptions());
+// CLAUDE.md + date: wrapped in <system-reminder>, injected into the first user message by the agent
+export function buildUserContextReminder(): string {
+  const date = new Date().toISOString().split("T")[0];
+  const claudeMd = loadClaudeMd();
+  return `<system-reminder>\n...${claudeMd}\n# currentDate\nToday's date is ${date}.\n...</system-reminder>`;
 }
 ```
 #### **Python**
@@ -264,27 +262,34 @@ def get_git_context() -> str:
         return ""
 
 
-def build_system_prompt() -> str:
-    from .memory import build_memory_prompt_section
-    from .skills import build_skill_descriptions
-    from .subagent import build_agent_descriptions
-    from datetime import date
+def build_static_system_prompt() -> str:
+    # Static core: return the template as-is -- this is the block cached via cache_control
+    return SYSTEM_PROMPT_TEMPLATE
 
-    replacements = {
-        "{{cwd}}": str(Path.cwd()),
-        "{{date}}": date.today().isoformat(),
-        "{{platform}}": f"{platform.system()} {platform.machine()}",
-        "{{shell}}": os.environ.get("SHELL", "/bin/sh"),
-        "{{git_context}}": get_git_context(),
-        "{{claude_md}}": load_claude_md(),
-        "{{memory}}": build_memory_prompt_section(),
-        "{{skills}}": build_skill_descriptions(),
-        "{{agents}}": build_agent_descriptions(),
-    }
-    result = SYSTEM_PROMPT_TEMPLATE
-    for key, value in replacements.items():
-        result = result.replace(key, value)
-    return result
+
+def build_dynamic_system_context() -> str:
+    # Dynamic block: environment + git + memory + skills + agent list
+    plat = f"{platform.system()} {platform.machine()}"
+    shell = os.environ.get("SHELL", "/bin/sh")
+    return (
+        f"# Environment\n"
+        f"Working directory: {Path.cwd()}\n"
+        f"Platform: {plat}\n"
+        f"Shell: {shell}"
+        f"{get_git_context()}{build_memory_prompt_section()}"
+        f"{build_skill_descriptions()}{build_agent_descriptions()}"
+    )
+
+
+def build_user_context_reminder() -> str:
+    # CLAUDE.md + date: wrapped in <system-reminder>, injected into the first user message by the agent
+    from datetime import date
+    return (
+        "<system-reminder>\n..."
+        f"{load_claude_md()}\n"
+        f"# currentDate\nToday's date is {date.today().isoformat()}.\n"
+        "...</system-reminder>"
+    )
 ```
 <!-- tabs:end -->
 
@@ -292,7 +297,7 @@ def build_system_prompt() -> str:
 
 | Claude Code | mini-claude | Reason |
 |------------|-------------|--------|
-| Static/Dynamic cache boundary | Not implemented | Tutorial project doesn't need API cost optimization |
+| Static/Dynamic cache boundary | static/dynamic split + cache_control on static block | See [Chapter 7: Prefix Caching](07-context.md) |
 | CLAUDE.md 5-layer discovery + .claude subdirectory | Traverse upward from CWD + .claude/rules/ | Covers common scenarios |
 | @include directive | Supports @./path, @~/path, @/path | Full implementation |
 | Anti-pattern inoculation (3 rules) | Fully preserved | Huge impact on output quality |

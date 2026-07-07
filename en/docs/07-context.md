@@ -62,7 +62,7 @@ The design philosophy is **progressive compression**: use the cheapest methods f
 
 **Token estimation** never calls additional APIs: it uses the `usage` from the most recent API response as an anchor, and estimates new messages at characters / 4. This reduces error from 30%+ with pure estimation to <5%.
 
-**Prompt caching** is fragile because any byte change in the prefix causes invalidation. Claude Code maintains stability at multiple levels: static/dynamic boundary markers, beta header sticky latching (once sent, it persists regardless of feature flag changes), cache breakpoints at the end of the tools array, and rupture detection (automatic attribution when `cache_read_input_tokens` drops >5%).
+**Prompt caching** is fragile because any byte change in the prefix causes invalidation. Claude Code maintains stability at multiple levels: static/dynamic boundary markers, beta header sticky latching (once sent, it persists regardless of feature flag changes), cache breakpoints at two spots -- the static system block and the last message (the tools array renders before system and gets cached along with its breakpoint), and rupture detection (automatic attribution when `cache_read_input_tokens` drops >5%).
 
 **Circuit breaker**: There was once a session that failed autocompact 3,272 consecutive times, wasting massive API calls. Now it stops retrying after 3 consecutive failures.
 
@@ -457,19 +457,30 @@ Updated after each API call:
 <!-- tabs:start -->
 #### **TypeScript**
 ```typescript
-this.totalInputTokens += response.usage.input_tokens;
+const cacheRead = (response.usage as any).cache_read_input_tokens || 0;
+const cacheCreation = (response.usage as any).cache_creation_input_tokens || 0;
+this.totalInputTokens += response.usage.input_tokens;   // uncached portion only
+this.totalCacheReadTokens += cacheRead;
+this.totalCacheCreationTokens += cacheCreation;
 this.totalOutputTokens += response.usage.output_tokens;
-this.lastInputTokenCount = response.usage.input_tokens;
+this.lastInputTokenCount =
+  response.usage.input_tokens + cacheRead + cacheCreation + response.usage.output_tokens;
 ```
 #### **Python**
 ```python
-self.total_input_tokens += response.usage.input_tokens
+cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+cache_creation = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+self.total_input_tokens += response.usage.input_tokens   # uncached portion only
+self.total_cache_read_tokens += cache_read
+self.total_cache_creation_tokens += cache_creation
 self.total_output_tokens += response.usage.output_tokens
-self.last_input_token_count = response.usage.input_tokens
+self.last_input_token_count = (
+    response.usage.input_tokens + cache_read + cache_creation + response.usage.output_tokens
+)
 ```
 <!-- tabs:end -->
 
-`lastInputTokenCount` is used to determine if we're approaching the window limit; `totalInputTokens` accumulates across all calls for cost estimation. We use API return values directly, which is simpler than Claude Code's anchor+estimation approach, and sufficient for our needs.
+With caching enabled, `input_tokens` only counts the uncached (missed) portion, so `lastInputTokenCount` (used to decide whether we're approaching the window limit) has to add all three categories of input tokens back in, plus this turn's output -- which becomes part of the prompt on the next turn. `totalInputTokens` accumulates separately from cache read/write; for cost estimation see the "Prefix Caching" section.
 
 The 4 tiers execute sequentially before each API call:
 
@@ -498,15 +509,72 @@ def _run_compression_pipeline(self) -> None:
 
 Tiers 1-3 run **before** every API call (zero API cost). Tier 4 runs at the **turn boundary** — after the user message is pushed into the array and before the `while` loop starts. **Do not** place Tier 4 at the end of the tool loop: at that point the last message is `{role: "user", content: [tool_result, ...]}`, and `compactAnthropic`'s `slice(0, -1)` would sever its pairing with the preceding `assistant` message's `tool_use`, causing the Anthropic API to reject the summarize call with *"tool_use ids were found without tool_result blocks immediately after"*. `lastInputTokenCount` is still usable in the new location — it reflects the state of the previous turn's final API call, which is enough to decide whether to trigger. The intra-pipeline order is also intentional: Budget compresses large results first, making Snip's deduplication judgments more accurate, and Microcompact performs indiscriminate cleanup last when the time condition is met.
 
+## Prefix Caching
+
+The tiers above are about "how to shrink context when it gets too big"; this section is about a different thing: given the same prefix, how do we keep the server from recomputing it every turn. Early versions did no caching -- every turn re-sent the full system prompt, tool definitions, and the ever-growing history as brand-new input, billed at full price -- with over five thousand tokens of prefix alone recomputed on every request. Once caching was added, from the second turn onward this part of a multi-turn conversation is essentially free.
+
+Claude Code's full approach is covered in detail in [Chapter 3](https://windy3f3f3f3f.github.io/how-claude-code-works/#/docs/03-context-engineering); here we describe which parts we copied and which we can't.
+
+### Two cache breakpoints
+
+Anthropic's caching never happens on its own -- with no `cache_control` anywhere in the request, nothing is cached and everything is billed at full price. There are two ways to opt in: explicit block-level breakpoints, the way Claude Code does it, or the top-level automatic caching launched in early 2026 (a single top-level `cache_control` field, and the system places and advances the breakpoint automatically). We follow Claude Code's explicit-breakpoint approach and set two:
+
+The first is on the system prompt. `buildAnthropicSystem` splits `system` from a single string into two text blocks -- the static core (the role, rules, and tool descriptions that are identical for every session) is marked `cache_control`, and the dynamic tail (environment, git, skill list) follows without a marker. The tools array doesn't need its own breakpoint: the API's render order is `tools -> system -> messages`, so marking the static system block also caches the tool definitions that come before it.
+
+The second breakpoint rolls onto the last message. Before each request, `withCacheBreakpoints` marks `cache_control` on the last content block of the final message in the array, so that the previous turn and everything earlier all fall within the cached prefix, and only the newly added part of the current turn needs to be reprocessed. It's a pure function that returns a modified copy without touching the original history -- otherwise request metadata like `cache_control` would get written into the session archive and summarization requests. It skips `thinking` blocks because their content is unstable, and marking them would actually lower the hit rate.
+
+<!-- tabs:start -->
+#### **TypeScript**
+```typescript
+private buildAnthropicSystem(): Anthropic.TextBlockParam[] {
+  const blocks: Anthropic.TextBlockParam[] = [
+    { type: "text", text: this.staticSystemPrompt, cache_control: { type: "ephemeral" } },
+  ];
+  if (dynamicText) blocks.push({ type: "text", text: dynamicText });
+  return blocks;
+}
+```
+#### **Python**
+```python
+def _build_anthropic_system(self) -> list[dict]:
+    blocks = [{"type": "text", "text": self._static_system_prompt,
+               "cache_control": {"type": "ephemeral"}}]
+    if dynamic_text:
+        blocks.append({"type": "text", "text": dynamic_text})
+    return blocks
+```
+<!-- tabs:end -->
+
+CLAUDE.md and the date aren't placed in the system prompt; instead they're wrapped as a `<system-reminder>` and inserted into the first user message (Claude Code's `prependUserContext`). This content varies by project, and leaving it in the system prompt would make the cached static block a separate copy per project, wasting cache.
+
+### Two things we can only approximate
+
+Claude Code has two things that are Anthropic first-party internal capabilities the public API can't offer; we can only approximate them, and we spell that out here:
+
+One is `scope: 'global'` cross-user sharing. Claude Code's static system prompt shares a single cache across all users worldwide. The public API has no such parameter -- omitting it just falls back to the public API's default isolation scope (workspace / organization level, per the current official docs), and this happens to be byte-identical to the fallback path Claude Code takes when it has MCP installed and can't share globally, so it's not really a deviation, just a smaller sharing scope.
+
+The other is `cache_edits` hot-cache in-place deletion. Chapter 3 covered microcompact's two paths, cold and hot: when the cache is cold it modifies messages directly, and when the cache is hot it uses `cache_edits` to have the server delete old results inside the cache without touching local messages. The hot path relies on an internal API -- even the leaked source has this part stripped out. We don't have this path, so we take a step back: when the cache is hot we simply don't modify history. A cache-hit prefix is billed at 0.1x anyway, so re-sending old results is already cheap, and not deleting them costs little.
+
+### Caching and compaction conflict
+
+This step is where the "cache-hot gate" in Tier 2 Snip above comes from. Snip rewrites old tool results in place, but the moment it touches an already-cached prefix, the cache from that message onward is all invalidated. So Snip now first checks whether the cache is hot: while it's still hot and utilization is not high (below 75%), it leaves it alone and waits for the cache to expire on its own; once utilization tops 75%, it would rather break the cache once to free up the window than push all the way to the more expensive auto-compact. In other words, aggressive trimming and prefix caching are inherently at odds -- with caching actually enabled, you don't need to trim as hard.
+
+### How costs are computed
+
+Cache-hit tokens aren't billed at full price: cache read is 0.1x and cache write is 1.25x, matching the multipliers set in Claude Code's `modelCost.ts`. `getCurrentCostUsd` prices these three categories of tokens separately, and `/cost` reports a hit rate alongside. The OpenAI-compatible backend doesn't need to mark `cache_control` -- the provider caches the prefix automatically, and the hit portion is in `prompt_tokens_details.cached_tokens`, which we split out of `prompt_tokens` and count separately. For pricing we uniformly apply Anthropic's 0.1x as an approximation; the actual cached rate varies by provider (officially around 0.5x for OpenAI, and compatible gateways make no guarantee), so the estimate on this path may be off in either direction.
+
+Verified once on a real machine: two turns in a row each sending a single sentence, the first turn had `cache_creation` in the five thousands and `cache_read` at zero (cold start, cache write), and the second turn had `cache_read` filled in, almost equal to what the first turn wrote (a hit). The TS and Python versions gave essentially the same numbers.
+
 ## Comparison
 
 | Dimension | Claude Code | mini-claude |
 |-----------|------------|-------------|
 | **Compression tiers** | 5-level pipeline | 4 tiers (budget + snip + microcompact + summary) |
-| **Token counting** | Anchor + rough estimation, no extra API calls | Direct use of API-returned input_tokens |
+| **Token counting** | Anchor + rough estimation, no extra API calls | Direct use of API return values, cache read/write priced separately |
 | **Budget trigger** | Based on remaining budget | 50%/70% dual threshold |
-| **Snip strategy** | Selective trimming + cache awareness | Same-file dedup + keep most recent 3 |
+| **Snip strategy** | Selective trimming + cache awareness | Same-file dedup + keep most recent 3 + cache-hot gate |
 | **Microcompact** | Time path + cache edit path | Only 5-minute idle trigger |
+| **Prefix caching** | 2 explicit breakpoints (tools covered by system) + scope:global + rupture detection | 2 breakpoints (system + last message), default scope (workspace-level) |
 | **Auto-compact** | Two-stage summary + post-compression recovery + circuit breaker | Single-paragraph summary, no recovery |
 | **Overflow storage** | Disk persistence, retrievable on demand | Disk persistence (>30KB), retrievable on demand |
 

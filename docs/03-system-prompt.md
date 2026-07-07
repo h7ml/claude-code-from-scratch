@@ -6,18 +6,20 @@
 
 ```mermaid
 graph TB
-    Template[SYSTEM_PROMPT_TEMPLATE<br/>内联 Markdown 模板] --> Builder[buildSystemPrompt<br/>变量替换]
-    CWD[工作目录] --> Builder
-    Git[Git 信息] --> Builder
-    ClaudeMD[CLAUDE.md<br/>项目指令] --> Builder
-    Memory[记忆系统] --> Builder
-    Skills[技能描述] --> Builder
-    Agents[Agent 描述] --> Builder
-    Builder --> Final[最终 System Prompt]
-    Final --> API[传给 API<br/>system 参数]
+    Template[SYSTEM_PROMPT_TEMPLATE<br/>内联 Markdown 模板] --> Static[静态核心<br/>标 cache_control 缓存]
+    CWD[工作目录] --> Dynamic[buildDynamicSystemContext<br/>动态块]
+    Git[Git 信息] --> Dynamic
+    Memory[记忆系统] --> Dynamic
+    Skills[技能描述] --> Dynamic
+    Agents[Agent 描述] --> Dynamic
+    Static --> API[传给 API<br/>system 参数]
+    Dynamic --> API
+    ClaudeMD[CLAUDE.md + 日期] --> Reminder[buildUserContextReminder<br/>system-reminder]
+    Reminder --> FirstMsg[注入第一条 user 消息]
 
-    style Builder fill:#7c5cfc,color:#fff
-    style Final fill:#e8e0ff
+    style Static fill:#7c5cfc,color:#fff
+    style Dynamic fill:#e8e0ff
+    style Reminder fill:#e8e0ff
 ```
 
 ## Claude Code 怎么做的
@@ -89,7 +91,7 @@ CLAUDE.md 是项目级指令文件，类似 `.eslintrc` 但面向 AI。Claude Co
 
 ### SYSTEM_PROMPT_TEMPLATE
 
-模板内联在 `prompt.ts` 中，用 `{{placeholder}}` 标记动态变量：
+模板内联在 `prompt.ts` 中。它就是静态核心本身——不含任何插值，跨会话逐字节不变，这正是它能被缓存的前提：
 
 ```typescript
 const SYSTEM_PROMPT_TEMPLATE = `You are Mini Claude Code, a lightweight coding assistant CLI.
@@ -134,19 +136,10 @@ User approving an action once does NOT mean they approve it in all contexts.
 IMPORTANT: Go straight to the point. Lead with conclusions, reasoning after.
 Skip filler phrases. One sentence where one sentence suffices.
 
-# Environment
-Working directory: {{cwd}}
-Date: {{date}}
-Platform: {{platform}}
-Shell: {{shell}}
-{{git_context}}
-{{claude_md}}
-{{memory}}
-{{skills}}
-{{agents}}`;
+If you can say it in one sentence, don't use three. ...`;
 ```
 
-`{{memory}}`、`{{skills}}`、`{{agents}}` 放在末尾——近因效应，这些动态内容的权重更大（详见第 8、9 章）。
+模板到这里就结束了——它只含**静态核心**：所有用户、所有会话都完全相同的角色定义、规则和工具说明。环境上下文（cwd、platform、shell、git 状态、记忆、技能、agent 列表）由 `buildDynamicSystemContext()` 单独构建成动态块，跟在静态块后面；CLAUDE.md 和当前日期则包成 `<system-reminder>` 注入第一条 user 消息。这样切分是给前缀缓存让路：静态核心标上 `cache_control` 后跨会话字节不变、稳定命中，而因项目而异的内容不去污染它（详见[第 7 章：前缀缓存](07-context.md)）。记忆、技能、agent 列表放在动态块末尾——近因效应，这些内容的权重更大（详见第 8、9 章）。
 
 ### prompt.ts 实现
 
@@ -200,23 +193,28 @@ export function getGitContext(): string {
   }
 }
 
-export function buildSystemPrompt(): string {
-  const date = new Date().toISOString().split("T")[0];
+// 静态核心：模板原样返回，不做任何插值——这是被 cache_control 缓存的块
+export function buildStaticSystemPrompt(): string {
+  return SYSTEM_PROMPT_TEMPLATE;
+}
+
+// 动态块：环境 + git + 记忆 + 技能 + agent 列表，会话内稳定但因机器/项目而异
+export function buildDynamicSystemContext(): string {
   const platform = `${os.platform()} ${os.arch()}`;
   const shell = process.platform === "win32"
     ? (process.env.ComSpec || "cmd.exe")
     : (process.env.SHELL || "/bin/sh");
+  return `# Environment
+Working directory: ${process.cwd()}
+Platform: ${platform}
+Shell: ${shell}${getGitContext()}${buildMemoryPromptSection()}${buildSkillDescriptions()}${buildAgentDescriptions()}`;
+}
 
-  return SYSTEM_PROMPT_TEMPLATE
-    .split("{{cwd}}").join(process.cwd())
-    .split("{{date}}").join(date)
-    .split("{{platform}}").join(platform)
-    .split("{{shell}}").join(shell)
-    .split("{{git_context}}").join(getGitContext())
-    .split("{{claude_md}}").join(loadClaudeMd())
-    .split("{{memory}}").join(buildMemoryPromptSection())
-    .split("{{skills}}").join(buildSkillDescriptions())
-    .split("{{agents}}").join(buildAgentDescriptions());
+// CLAUDE.md + 日期：包成 <system-reminder>，由 agent 注入第一条 user 消息
+export function buildUserContextReminder(): string {
+  const date = new Date().toISOString().split("T")[0];
+  const claudeMd = loadClaudeMd();
+  return `<system-reminder>\n...${claudeMd}\n# currentDate\nToday's date is ${date}.\n...</system-reminder>`;
 }
 ```
 #### **Python**
@@ -264,27 +262,34 @@ def get_git_context() -> str:
         return ""
 
 
-def build_system_prompt() -> str:
-    from .memory import build_memory_prompt_section
-    from .skills import build_skill_descriptions
-    from .subagent import build_agent_descriptions
-    from datetime import date
+def build_static_system_prompt() -> str:
+    # 静态核心：模板原样返回——这是被 cache_control 缓存的块
+    return SYSTEM_PROMPT_TEMPLATE
 
-    replacements = {
-        "{{cwd}}": str(Path.cwd()),
-        "{{date}}": date.today().isoformat(),
-        "{{platform}}": f"{platform.system()} {platform.machine()}",
-        "{{shell}}": os.environ.get("SHELL", "/bin/sh"),
-        "{{git_context}}": get_git_context(),
-        "{{claude_md}}": load_claude_md(),
-        "{{memory}}": build_memory_prompt_section(),
-        "{{skills}}": build_skill_descriptions(),
-        "{{agents}}": build_agent_descriptions(),
-    }
-    result = SYSTEM_PROMPT_TEMPLATE
-    for key, value in replacements.items():
-        result = result.replace(key, value)
-    return result
+
+def build_dynamic_system_context() -> str:
+    # 动态块：环境 + git + 记忆 + 技能 + agent 列表
+    plat = f"{platform.system()} {platform.machine()}"
+    shell = os.environ.get("SHELL", "/bin/sh")
+    return (
+        f"# Environment\n"
+        f"Working directory: {Path.cwd()}\n"
+        f"Platform: {plat}\n"
+        f"Shell: {shell}"
+        f"{get_git_context()}{build_memory_prompt_section()}"
+        f"{build_skill_descriptions()}{build_agent_descriptions()}"
+    )
+
+
+def build_user_context_reminder() -> str:
+    # CLAUDE.md + 日期：包成 <system-reminder>，由 agent 注入第一条 user 消息
+    from datetime import date
+    return (
+        "<system-reminder>\n..."
+        f"{load_claude_md()}\n"
+        f"# currentDate\nToday's date is {date.today().isoformat()}.\n"
+        "...</system-reminder>"
+    )
 ```
 <!-- tabs:end -->
 
@@ -292,7 +297,7 @@ def build_system_prompt() -> str:
 
 | Claude Code | mini-claude | 理由 |
 |------------|-------------|------|
-| Static/Dynamic 缓存边界 | 不实现 | 教程项目无需优化 API 成本 |
+| Static/Dynamic 缓存边界 | 拆静态/动态 + 静态块打 `cache_control` | 见[第 7 章：前缀缓存](07-context.md) |
 | CLAUDE.md 5 层发现 + .claude 子目录 | 从 CWD 向上遍历 + .claude/rules/ | 覆盖常见场景 |
 | @include 指令 | 支持 @./path、@~/path、@/path | 完整实现 |
 | 反模式接种（3 条规则） | 完整保留 | 对输出质量影响极大 |

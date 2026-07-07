@@ -18,7 +18,7 @@ import {
   stopSpinner,
 } from "./ui.js";
 import { saveSession } from "./session.js";
-import { buildSystemPrompt } from "./prompt.js";
+import { buildSystemPrompt, buildStaticSystemPrompt, buildDynamicSystemContext, buildUserContextReminder } from "./prompt.js";
 import { getSubAgentConfig, type SubAgentType } from "./subagent.js";
 import {
   startMemoryPrefetch, formatMemoriesForInjection,
@@ -77,7 +77,7 @@ function getContextWindow(model: string): number {
 }
 
 // ─── Thinking support detection ─────────────────────────────
-// Mirrors Claude Code: adaptive for 4.6, enabled for older Claude 4, disabled for the rest.
+// Following the general Claude 4.x thinking-mode guidance: adaptive for 4.6, enabled for older Claude 4, disabled for the rest.
 
 function modelSupportsThinking(model: string): boolean {
   const m = model.toLowerCase();
@@ -92,7 +92,7 @@ function modelSupportsAdaptiveThinking(model: string): boolean {
   return m.includes("opus-4-6") || m.includes("sonnet-4-6");
 }
 
-// Max output tokens by model (mirrors Claude Code's context.ts)
+// Max output tokens by model (following the same caps Claude Code uses publicly)
 function getMaxOutputTokens(model: string): number {
   const m = model.toLowerCase();
   if (m.includes("opus-4-6")) return 64000;
@@ -115,11 +115,15 @@ function toOpenAITools(tools: ToolDef[]): OpenAI.ChatCompletionTool[] {
 }
 
 // ─── Multi-tier compression constants ────────────────────────
-// Mirrors Claude Code's 4-layer compression: budget → snip → microcompact → auto-compact
+// 4-layer compression pipeline inspired by Claude Code's published design: budget → snip → microcompact → auto-compact
 
 const SNIPPABLE_TOOLS = new Set(["read_file", "grep_search", "list_files", "run_shell"]);
 const SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]";
 const SNIP_THRESHOLD = 0.60;
+// Above this utilization we snip even while the cache is hot: preserving the
+// cache is not worth risking a context overflow. Below it, a hot cache is left
+// untouched (see snip functions). Sits between SNIP_THRESHOLD and autocompact.
+const SNIP_HOT_OVERRIDE = 0.75;
 const MICROCOMPACT_IDLE_MS = 5 * 60 * 1000; // 5 minutes
 const KEEP_RECENT_RESULTS = 3;
 
@@ -154,6 +158,8 @@ export class Agent {
   private tools: ToolDef[];
   private totalInputTokens = 0;
   private totalOutputTokens = 0;
+  private totalCacheReadTokens = 0;      // Prompt-cache hits (billed ~0.1x)
+  private totalCacheCreationTokens = 0;  // Prompt-cache writes (billed ~1.25x)
   private lastInputTokenCount = 0;
   private effectiveWindow: number;
   private sessionId: string;
@@ -182,6 +188,16 @@ export class Agent {
   private prePlanMode: PermissionMode | null = null;
   private planFilePath: string | null = null;
   private baseSystemPrompt: string = "";
+  // Static/dynamic split for prefix caching: the static half is identical for
+  // every session and sits behind a cache_control breakpoint; the dynamic half
+  // (env, git, memory, CLAUDE.md) stays uncached. Mirrors Claude Code's
+  // splitSysPromptPrefix (see how-claude-code-works ch3.6).
+  private staticSystemPrompt: string = "";
+  private dynamicSystemContext: string = "";
+  // CLAUDE.md + date, injected into the first user message (Claude Code's
+  // prependUserContext) rather than the system prompt, so the system stays
+  // project-independent and cacheable. Empty for custom system prompts.
+  private userContextReminder: string = "";
   private contextCleared: boolean = false; // Set when plan approval clears context
 
   // External confirmation callback (avoids creating a second readline on stdin)
@@ -227,8 +243,23 @@ export class Agent {
     this.sessionId = randomUUID().slice(0, 8);
     this.sessionStartTime = new Date().toISOString();
 
-    // Build system prompt (with plan mode injection if needed)
-    this.baseSystemPrompt = options.customSystemPrompt || buildSystemPrompt();
+    // Build system prompt with a static/dynamic split for prefix caching.
+    // A custom system prompt overrides both halves (all of it is treated as
+    // static). Otherwise the static core is cacheable, env/git/skills form the
+    // dynamic tail, and CLAUDE.md + date go into the FIRST user message as a
+    // <system-reminder> (Claude Code's prependUserContext) — see chat(). Keeping
+    // project-specific content out of the system prompt maximizes cache sharing.
+    if (options.customSystemPrompt) {
+      this.staticSystemPrompt = options.customSystemPrompt;
+      this.dynamicSystemContext = "";
+    } else {
+      this.staticSystemPrompt = buildStaticSystemPrompt();
+      this.dynamicSystemContext = buildDynamicSystemContext();
+      this.userContextReminder = buildUserContextReminder();
+    }
+    this.baseSystemPrompt = this.dynamicSystemContext
+      ? this.staticSystemPrompt + "\n\n" + this.dynamicSystemContext
+      : this.staticSystemPrompt;
     if (this.permissionMode === "plan") {
       this.planFilePath = this.generatePlanFilePath();
       this.systemPrompt = this.baseSystemPrompt + this.buildPlanModePrompt();
@@ -248,6 +279,48 @@ export class Agent {
         ...(options.anthropicBaseURL ? { baseURL: options.anthropicBaseURL } : {}),
       });
     }
+  }
+
+  // ─── Prefix caching (Anthropic) ─────────────────────────────
+  // Build the `system` field as an array of text blocks with a cache_control
+  // breakpoint on the static core. Everything up to and including that block
+  // (the tool schemas render before `system`, so they are covered too) is
+  // cached server-side; the dynamic tail sits after the breakpoint. This is
+  // Claude Code's scope-omitted path — the exact bytes it emits when global
+  // cache scope is unavailable. See how-claude-code-works ch3.6.
+  private buildAnthropicSystem(): Anthropic.TextBlockParam[] {
+    const planSuffix = this.permissionMode === "plan" ? this.buildPlanModePrompt() : "";
+    const dynamicText = (this.dynamicSystemContext + planSuffix).trim();
+    const blocks: Anthropic.TextBlockParam[] = [
+      { type: "text", text: this.staticSystemPrompt, cache_control: { type: "ephemeral" } },
+    ];
+    if (dynamicText) blocks.push({ type: "text", text: dynamicText });
+    return blocks;
+  }
+
+  // Return a COPY of the message list with a cache_control breakpoint on the
+  // last message's final content block, so every prior turn stays in the cached
+  // prefix and only the newest messages are processed. Pure: the persistent
+  // history is never mutated with this API metadata (Claude Code clones request
+  // params at the render layer for the same reason, keeping session save /
+  // compact / restore clean). Faithful to CC's assistantMessageToMessageParam,
+  // we look only at the very LAST block and skip it when it is a thinking block
+  // (unstable content → marking it would hurt cache hits). Only 1 message
+  // breakpoint + 1 system breakpoint per request, well under the API cap of 4.
+  private withCacheBreakpoints(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+    if (messages.length === 0) return messages;
+    const out = messages.slice();
+    const idx = out.length - 1;
+    const last = out[idx];
+    const content = typeof last.content === "string"
+      ? [{ type: "text", text: last.content } as any]
+      : (last.content as any[]).slice();
+    const tail = content[content.length - 1] as any;
+    if (tail && tail.type !== "thinking" && tail.type !== "redacted_thinking") {
+      content[content.length - 1] = { ...tail, cache_control: { type: "ephemeral" } };
+      out[idx] = { ...last, content } as Anthropic.MessageParam;
+    }
+    return out;
   }
 
   private resolveThinkingMode(): "adaptive" | "enabled" | "disabled" {
@@ -411,6 +484,8 @@ export class Agent {
     }
     this.totalInputTokens = 0;
     this.totalOutputTokens = 0;
+    this.totalCacheReadTokens = 0;
+    this.totalCacheCreationTokens = 0;
     this.lastInputTokenCount = 0;
     printInfo("Conversation cleared.");
   }
@@ -419,17 +494,28 @@ export class Agent {
     const total = this.getCurrentCostUsd();
     const budgetInfo = this.maxCostUsd ? ` / $${this.maxCostUsd} budget` : "";
     const turnInfo = this.maxTurns ? ` | Turns: ${this.currentTurns}/${this.maxTurns}` : "";
+    const cached = this.totalCacheReadTokens;
+    const billedInput = this.totalInputTokens + this.totalCacheCreationTokens + cached;
+    const hitRate = billedInput > 0 ? Math.round((cached / billedInput) * 100) : 0;
+    const cacheInfo = (cached || this.totalCacheCreationTokens)
+      ? `\n  Cache: ${cached} read / ${this.totalCacheCreationTokens} write (${hitRate}% of input from cache)`
+      : "";
     printInfo(
-      `Tokens: ${this.totalInputTokens} in / ${this.totalOutputTokens} out\n  Estimated cost: $${total.toFixed(4)}${budgetInfo}${turnInfo}`
+      `Tokens: ${this.totalInputTokens} in / ${this.totalOutputTokens} out${cacheInfo}\n  Estimated cost: $${total.toFixed(4)}${budgetInfo}${turnInfo}`
     );
   }
 
   // ─── Budget control ────────────────────────────────────────
 
   private getCurrentCostUsd(): number {
-    const costIn = (this.totalInputTokens / 1_000_000) * 3;
-    const costOut = (this.totalOutputTokens / 1_000_000) * 15;
-    return costIn + costOut;
+    const M = 1_000_000;
+    // Base input $3/Mtok. Cache read is 0.1x, cache write is 1.25x — the fixed
+    // multipliers Claude Code uses across every model tier (utils/modelCost.ts).
+    const costIn = (this.totalInputTokens / M) * 3;
+    const costCacheRead = (this.totalCacheReadTokens / M) * 0.3;
+    const costCacheWrite = (this.totalCacheCreationTokens / M) * 3.75;
+    const costOut = (this.totalOutputTokens / M) * 15;
+    return costIn + costCacheRead + costCacheWrite + costOut;
   }
 
   private checkBudget(): { exceeded: boolean; reason?: string } {
@@ -555,7 +641,7 @@ export class Agent {
   }
 
   // ─── Multi-tier compression pipeline ──────────────────────
-  // Mirrors Claude Code's 4-layer: budget → snip → microcompact → auto-compact
+  // 4-layer compression inspired by Claude Code's published design: budget → snip → microcompact → auto-compact
   // Tiers 1-3 are zero-API-cost, operating on the local message array.
 
   private runCompressionPipeline(): void {
@@ -610,7 +696,16 @@ export class Agent {
 
   // Tier 2: Snip stale results — replace old/duplicate tool results with placeholder
   private snipStaleResultsAnthropic(): void {
+    // Cache-aware gate (mirrors Claude Code's cached-microcompact split): while
+    // the prompt cache is still hot, rewriting an old tool_result in place would
+    // invalidate the entire cached message prefix. Claude Code prunes hot caches
+    // via a cache_edits API call unavailable on the public API, so we leave the
+    // hot prefix alone — UNTIL utilization is high enough (SNIP_HOT_OVERRIDE)
+    // that risking an overflow costs more than one cache rebuild. Below that we
+    // wait for the cache to go cold.
     const utilization = this.lastInputTokenCount / this.effectiveWindow;
+    const cacheHot = this.lastApiCallTime > 0 && (Date.now() - this.lastApiCallTime) < MICROCOMPACT_IDLE_MS;
+    if (cacheHot && utilization < SNIP_HOT_OVERRIDE) return;
     if (utilization < SNIP_THRESHOLD) return;
 
     // Collect all tool_result blocks with metadata
@@ -665,7 +760,12 @@ export class Agent {
   }
 
   private snipStaleResultsOpenAI(): void {
+    // Cache-aware gate — see snipStaleResultsAnthropic. OpenAI-compatible
+    // providers cache prefixes automatically, so the same "don't rewrite a hot
+    // prefix (unless utilization is high)" rule applies.
     const utilization = this.lastInputTokenCount / this.effectiveWindow;
+    const cacheHot = this.lastApiCallTime > 0 && (Date.now() - this.lastApiCallTime) < MICROCOMPACT_IDLE_MS;
+    if (cacheHot && utilization < SNIP_HOT_OVERRIDE) return;
     if (utilization < SNIP_THRESHOLD) return;
 
     // Collect tool messages
@@ -1033,8 +1133,37 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
   // ─── Anthropic backend ───────────────────────────────────────
 
+  // Push a user message, prepending the CLAUDE.md/date <system-reminder> when
+  // it is the first user message of a (possibly just-cleared) context — Claude
+  // Code's prependUserContext, kept out of the cached system prompt. Embedded
+  // in the user message rather than a standalone message to preserve
+  // user/assistant alternation. Also used by the plan clear-and-execute path,
+  // which rebuilds history from empty.
+  private pushAnthropicUserMessage(content: string): void {
+    if (this.anthropicMessages.length === 0 && this.userContextReminder) {
+      this.anthropicMessages.push({
+        role: "user",
+        content: [
+          { type: "text", text: this.userContextReminder },
+          { type: "text", text: content },
+        ],
+      });
+    } else {
+      this.anthropicMessages.push({ role: "user", content });
+    }
+  }
+
+  private pushOpenAIUserMessage(content: string): void {
+    const isFirstUser = !this.openaiMessages.some((m) => m.role === "user");
+    if (isFirstUser && this.userContextReminder) {
+      this.openaiMessages.push({ role: "user", content: `${this.userContextReminder}\n\n${content}` });
+    } else {
+      this.openaiMessages.push({ role: "user", content });
+    }
+  }
+
   private async chatAnthropic(userMessage: string): Promise<void> {
-    this.anthropicMessages.push({ role: "user", content: userMessage });
+    this.pushAnthropicUserMessage(userMessage);
     // Auto-compact at turn boundary only — the last message is now plain
     // user text, so the slice in compactAnthropic won't sever a
     // tool_use ↔ tool_result pair from the previous turn's tool execution.
@@ -1074,9 +1203,20 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       });
       if (!this.isSubAgent) stopSpinner();
       this.lastApiCallTime = Date.now();
+      // Anthropic reports cached tokens separately: `input_tokens` counts only
+      // the uncached (freshly processed) prefix, while cache_read/cache_creation
+      // are billed at 0.1x/1.25x. Track them apart for accurate cost.
+      const cacheRead = (response.usage as any).cache_read_input_tokens || 0;
+      const cacheCreation = (response.usage as any).cache_creation_input_tokens || 0;
       this.totalInputTokens += response.usage.input_tokens;
+      this.totalCacheReadTokens += cacheRead;
+      this.totalCacheCreationTokens += cacheCreation;
       this.totalOutputTokens += response.usage.output_tokens;
-      this.lastInputTokenCount = response.usage.input_tokens;
+      // Estimate next-turn context size for the compaction gauge: the full
+      // prompt we just sent (input + cache_read + cache_creation) plus the
+      // output we just generated, which becomes part of the next request.
+      this.lastInputTokenCount =
+        response.usage.input_tokens + cacheRead + cacheCreation + response.usage.output_tokens;
 
       const toolUses: Anthropic.ToolUseBlock[] = [];
 
@@ -1093,7 +1233,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
       if (toolUses.length === 0) {
         if (!this.isSubAgent) {
-          printCost(this.totalInputTokens, this.totalOutputTokens);
+          printCost(this.totalInputTokens, this.totalOutputTokens, this.totalCacheReadTokens, this.totalCacheCreationTokens);
         }
         break;
       }
@@ -1159,7 +1299,9 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
         if (this.contextCleared) {
           this.contextCleared = false;
-          this.anthropicMessages.push({ role: "user", content: res });
+          // History was just cleared — route through the helper so the rebuilt
+          // context's first user message carries the CLAUDE.md/date reminder.
+          this.pushAnthropicUserMessage(res);
           contextBreak = true;
           break;
         }
@@ -1179,7 +1321,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
    * Stream an Anthropic API call. When a tool_use content block finishes
    * during streaming, `onToolBlockComplete` fires immediately so the caller
    * can start execution before the full response arrives (streaming tool
-   * execution — mirrors Claude Code's content_block_stop approach).
+   * execution — inspired by Claude Code's content_block_stop streaming pattern).
    */
   private async callAnthropicStream(
     onToolBlockComplete?: (block: Anthropic.ToolUseBlock) => void,
@@ -1189,9 +1331,11 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       const createParams: any = {
         model: this.model,
         max_tokens: this.thinkingMode !== "disabled" ? maxOutput : 16384,
-        system: this.systemPrompt,
+        system: this.buildAnthropicSystem(),
         tools: getActiveToolDefinitions(this.tools),
-        messages: this.anthropicMessages,
+        // Rolling message-array cache breakpoint, applied to a copy so the
+        // persistent history stays free of cache_control metadata.
+        messages: this.withCacheBreakpoints(this.anthropicMessages),
       };
 
       if (this.thinkingMode === "adaptive") {
@@ -1267,7 +1411,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
   // ─── OpenAI-compatible backend ───────────────────────────────
 
   private async chatOpenAI(userMessage: string): Promise<void> {
-    this.openaiMessages.push({ role: "user", content: userMessage });
+    this.pushOpenAIUserMessage(userMessage);
     // Auto-compact at turn boundary only — see chatAnthropic for rationale.
     // The last message is now plain user text, so the slice in compactOpenAI
     // won't orphan a tool_calls / tool message pair.
@@ -1290,11 +1434,23 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       if (!this.isSubAgent) stopSpinner();
       this.lastApiCallTime = Date.now();
 
-      // Track tokens
+      // Track tokens. OpenAI-compatible providers cache prefixes automatically
+      // (no cache_control needed); the cached portion is included in
+      // prompt_tokens, so split it out to avoid double-counting. Clamp to
+      // [0, prompt_tokens] since compatible gateways don't guarantee the field.
+      // NOTE: we price it at Anthropic's 0.1x for simplicity; actual cached
+      // rates vary by provider (OpenAI ~0.5x, gateways vary), so the
+      // OpenAI-path estimate may be off in either direction.
       if (response.usage) {
-        this.totalInputTokens += response.usage.prompt_tokens;
+        const prompt = response.usage.prompt_tokens || 0;
+        const rawCached = response.usage.prompt_tokens_details?.cached_tokens || 0;
+        const cachedOA = Math.min(Math.max(rawCached, 0), prompt);
+        this.totalInputTokens += prompt - cachedOA;
+        this.totalCacheReadTokens += cachedOA;
         this.totalOutputTokens += response.usage.completion_tokens;
-        this.lastInputTokenCount = response.usage.prompt_tokens;
+        // Estimate next-turn context size: this prompt + the output we just
+        // generated (which becomes part of the next request).
+        this.lastInputTokenCount = prompt + response.usage.completion_tokens;
       }
 
       const choice = response.choices?.[0];
@@ -1308,7 +1464,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       const toolCalls = message.tool_calls;
       if (!toolCalls || toolCalls.length === 0) {
         if (!this.isSubAgent) {
-          printCost(this.totalInputTokens, this.totalOutputTokens);
+          printCost(this.totalInputTokens, this.totalOutputTokens, this.totalCacheReadTokens, this.totalCacheCreationTokens);
         }
         break;
       }
@@ -1399,7 +1555,9 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
             if (this.contextCleared) {
               this.contextCleared = false;
-              this.openaiMessages.push({ role: "user", content: res });
+              // History was just cleared — route through the helper so the
+              // rebuilt context's first user message carries the reminder.
+              this.pushOpenAIUserMessage(res);
               oaiContextBreak = true;
               break;
             }
@@ -1428,17 +1586,16 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       let firstText = true;
       const toolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map();
       let finishReason = "";
-      let usage: { prompt_tokens: number; completion_tokens: number } | undefined;
+      let usage: OpenAI.CompletionUsage | undefined;
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta;
 
-        // Usage comes in the final chunk (no delta)
+        // Usage comes in the final chunk (no delta). Keep prompt_tokens_details
+        // (its cached_tokens is the auto-cached portion) so cost accounting can
+        // split it out — mirrors the Python path.
         if (chunk.usage) {
-          usage = {
-            prompt_tokens: chunk.usage.prompt_tokens,
-            completion_tokens: chunk.usage.completion_tokens,
-          };
+          usage = chunk.usage;
         }
 
         if (!delta) continue;

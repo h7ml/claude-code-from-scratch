@@ -83,13 +83,17 @@ export function printDivider() {
   console.log(chalk.gray("\n  " + "─".repeat(50)));
 }
 
-export function printCost(inputTokens: number, outputTokens: number) {
-  const costIn = (inputTokens / 1_000_000) * 3;
-  const costOut = (outputTokens / 1_000_000) * 15;
-  const total = costIn + costOut;
+export function printCost(inputTokens: number, outputTokens: number, cacheRead = 0, cacheCreation = 0) {
+  // Cache read is billed 0.1x, cache write 1.25x (see agent getCurrentCostUsd).
+  const total =
+    (inputTokens / 1_000_000) * 3 +
+    (cacheRead / 1_000_000) * 0.3 +
+    (cacheCreation / 1_000_000) * 3.75 +
+    (outputTokens / 1_000_000) * 15;
+  const cacheStr = cacheRead ? `, ${cacheRead} cached` : "";
   console.log(
     chalk.gray(
-      `\n  Tokens: ${inputTokens} in / ${outputTokens} out (~$${total.toFixed(4)})`
+      `\n  Tokens: ${inputTokens} in / ${outputTokens} out${cacheStr} (~$${total.toFixed(4)})`
     )
   );
 }

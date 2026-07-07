@@ -9,7 +9,7 @@ import { getDeferredToolNames } from "./tools.js";
 
 // ─── @include resolution ─────────────────────────────────────
 // Resolves @./path, @~/path, @/path references in CLAUDE.md files.
-// Mirrors Claude Code's include directive: recursively replaces @-references
+// Follows the @include directive pattern commonly used in agent prompt files: recursively replaces @-references
 // with file contents, preventing circular includes via a visited set.
 
 const INCLUDE_REGEX = /^@(\.\/[^\s]+|~\/[^\s]+|\/[^\s]+)$/gm;
@@ -183,30 +183,34 @@ Focus text output on:
 - High-level status updates at natural milestones
 - Errors or blockers that change the plan
 
-If you can say it in one sentence, don't use three. Prefer short, direct sentences over long explanations. This does not apply to code or tool calls.
+If you can say it in one sentence, don't use three. Prefer short, direct sentences over long explanations. This does not apply to code or tool calls.`;
 
-# Environment
-Working directory: {{cwd}}
-Date: {{date}}
-Platform: {{platform}}
-Shell: {{shell}}
-{{git_context}}
-{{claude_md}}
-{{memory}}
-{{skills}}
-{{agents}}
-{{deferred_tools}}`;
+// ─── Static / dynamic split for prefix caching ───────────────
+// Claude Code splits the system prompt at a static/dynamic boundary so the
+// static half (identical for every user and every session) can sit behind a
+// cache_control breakpoint, while volatile per-session context lives after
+// the boundary or in the message array. We mirror that split here: the
+// template above is the static core; env/git/memory/skills are the dynamic
+// tail; CLAUDE.md + date go into a <system-reminder> block (see
+// buildUserContextReminder) that the agent injects into the FIRST user message
+// — Claude Code's prependUserContext. See how-claude-code-works ch3.6
+// "前缀缓存策略".
 
-// ─── System prompt builder ───────────────────────────────────
+// The all-users-identical core. Never changes between users or sessions, so
+// it is the block we mark with cache_control.
+export function buildStaticSystemPrompt(): string {
+  return SYSTEM_PROMPT_TEMPLATE;
+}
 
-export function buildSystemPrompt(): string {
-  const date = new Date().toISOString().split("T")[0];
+// Per-session context: stable within a session (computed once at startup) but
+// varies by machine/project, so it stays uncached (or shares the last-message
+// breakpoint). Kept OUT of the static block to protect its cache.
+export function buildDynamicSystemContext(): string {
   const platform = `${os.platform()} ${os.arch()}`;
   const shell = process.platform === "win32"
     ? (process.env.ComSpec || "cmd.exe")
     : (process.env.SHELL || "/bin/sh");
   const gitContext = getGitContext();
-  const claudeMd = loadClaudeMd();
   const memorySection = buildMemoryPromptSection();
   const skillsSection = buildSkillDescriptions();
   const agentSection = buildAgentDescriptions();
@@ -216,15 +220,34 @@ export function buildSystemPrompt(): string {
     ? `\n\nThe following deferred tools are available via tool_search: ${deferredNames.join(", ")}. Use tool_search to fetch their full schemas when needed.`
     : "";
 
-  return SYSTEM_PROMPT_TEMPLATE
-    .split("{{cwd}}").join(process.cwd())
-    .split("{{date}}").join(date)
-    .split("{{platform}}").join(platform)
-    .split("{{shell}}").join(shell)
-    .split("{{git_context}}").join(gitContext)
-    .split("{{claude_md}}").join(claudeMd)
-    .split("{{memory}}").join(memorySection)
-    .split("{{skills}}").join(skillsSection)
-    .split("{{agents}}").join(agentSection)
-    .split("{{deferred_tools}}").join(deferredSection);
+  return `# Environment
+Working directory: ${process.cwd()}
+Platform: ${platform}
+Shell: ${shell}${gitContext}${memorySection}${skillsSection}${agentSection}${deferredSection}`;
+}
+
+// CLAUDE.md + date, wrapped in <system-reminder>. Project-specific content here
+// would fragment the system prompt cache, so it must stay out of the cached
+// static block. Like Claude Code's prependUserContext, the agent injects this
+// into the first user message of the conversation.
+export function buildUserContextReminder(): string {
+  const date = new Date().toISOString().split("T")[0];
+  const claudeMd = loadClaudeMd();
+  const claudeMdSection = claudeMd ? `${claudeMd}\n` : "";
+  return `<system-reminder>
+As you answer the user's questions, you can use the following context:${claudeMdSection ? "\n" + claudeMdSection : ""}
+# currentDate
+Today's date is ${date}.
+
+IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
+</system-reminder>`;
+}
+
+// ─── System prompt builder ───────────────────────────────────
+// Combined static + dynamic prompt as a single string. Used by the
+// OpenAI-compatible backend (which relies on the provider's automatic prefix
+// caching) and as a fallback; the Anthropic backend uses the split blocks
+// above so it can place its own cache_control breakpoint.
+export function buildSystemPrompt(): string {
+  return `${buildStaticSystemPrompt()}\n\n${buildDynamicSystemContext()}`;
 }

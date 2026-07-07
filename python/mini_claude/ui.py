@@ -81,11 +81,16 @@ def print_divider() -> None:
     console.print(f"\n[dim]  {'─' * 50}[/dim]")
 
 
-def print_cost(input_tokens: int, output_tokens: int) -> None:
-    cost_in = (input_tokens / 1_000_000) * 3
-    cost_out = (output_tokens / 1_000_000) * 15
-    total = cost_in + cost_out
-    console.print(f"\n[dim]  Tokens: {input_tokens} in / {output_tokens} out (~${total:.4f})[/dim]")
+def print_cost(input_tokens: int, output_tokens: int, cache_read: int = 0, cache_creation: int = 0) -> None:
+    # Cache read is billed 0.1x, cache write 1.25x (see agent _get_current_cost_usd).
+    total = (
+        (input_tokens / 1_000_000) * 3
+        + (cache_read / 1_000_000) * 0.3
+        + (cache_creation / 1_000_000) * 3.75
+        + (output_tokens / 1_000_000) * 15
+    )
+    cache_str = f", {cache_read} cached" if cache_read else ""
+    console.print(f"\n[dim]  Tokens: {input_tokens} in / {output_tokens} out{cache_str} (~${total:.4f})[/dim]")
 
 
 def print_retry(attempt: int, max_retries: int, reason: str) -> None:
