@@ -94,6 +94,8 @@ export function startMock({ scenario, logPath } = {}) {
           system: typeof body.system === "string" ? body.system : (Array.isArray(body.system) ? body.system.map((b) => b.text).join("") : ""),
           tools: (body.tools || []).map((t) => t.name),
           toolResults,
+          messageCount: (body.messages || []).length,
+          firstUserText: (() => { const m = (body.messages || []).find((x) => x.role === "user"); return typeof m?.content === "string" ? m.content : ""; })(),
           stream: !!body.stream,
         }) + "\n");
       }

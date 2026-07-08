@@ -23,6 +23,7 @@ const STEPS = [
   { n: 1, name: "01-agent-loop" },
   { n: 2, name: "02-tools" },
   { n: 3, name: "03-system-prompt" },
+  { n: 4, name: "04-cli-session" },
 ];
 
 // Each file, and the first step at which it exists.
@@ -32,12 +33,14 @@ const FILES = {
     { file: "tools.ts", from: 1 },
     { file: "cli.ts", from: 1 },
     { file: "prompt.ts", from: 3 },
+    { file: "session.ts", from: 4 },
   ],
   py: [
     { file: "agent.py", from: 1 },
     { file: "tools.py", from: 1 },
     { file: "__main__.py", from: 1 },
     { file: "prompt.py", from: 3 },
+    { file: "session.py", from: 4 },
   ],
 };
 

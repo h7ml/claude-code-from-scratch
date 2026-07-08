@@ -74,4 +74,10 @@ export class Agent {
     }
   }
 //#endregion
+//#step >=4
+  // Session support: expose the history so the CLI can save it and restore it.
+  history(): Anthropic.MessageParam[] { return this.messages; }
+  loadHistory(messages: Anthropic.MessageParam[]): void { this.messages = messages; }
+  clearHistory(): void { this.messages = []; }
+//#endstep
 }

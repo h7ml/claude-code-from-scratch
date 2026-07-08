@@ -34,8 +34,10 @@ function setupFiles(scenario, workdir) {
 
 async function runTs(n, scenario, logPath, workdir) {
   const tsDir = join(DIST, stepName(n), "ts");
+  // CLI-mode scenarios drive cli.ts; chat-mode drives agent.ts. Compile the entry.
+  const entry = scenario.runs ? "cli.ts" : "agent.ts";
   const build = spawnSync(TSC, ["--module", "nodenext", "--moduleResolution", "nodenext", "--target", "es2022",
-    "--skipLibCheck", "--outDir", tsDir, join(tsDir, "agent.ts")], { encoding: "utf-8" });
+    "--skipLibCheck", "--outDir", tsDir, join(tsDir, entry)], { encoding: "utf-8" });
   if (build.status !== 0) throw new Error(`tsc failed for step ${n}:\n${build.stdout}${build.stderr}`);
   setupFiles(scenario, workdir);
   const mock = await startMock({ scenario, logPath });
@@ -45,8 +47,13 @@ async function runTs(n, scenario, logPath, workdir) {
   process.chdir(workdir);
   process.stdout.write = (s) => { out += s; return true; }; // capture, don't discard
   try {
-    const mod = await import(pathToFileURL(join(tsDir, "agent.js")).href + `?t=${Date.now()}`);
-    await new mod.Agent().chat(scenario.prompt);
+    if (scenario.runs) {
+      const mod = await import(pathToFileURL(join(tsDir, "cli.js")).href + `?t=${Date.now()}`);
+      for (const run of scenario.runs) await mod.runCli(run.argv);
+    } else {
+      const mod = await import(pathToFileURL(join(tsDir, "agent.js")).href + `?t=${Date.now()}`);
+      await new mod.Agent().chat(scenario.prompt);
+    }
   } finally {
     process.stdout.write = prev.write; process.chdir(prev.cwd);
     process.env.ANTHROPIC_BASE_URL = prev.base; process.env.ANTHROPIC_API_KEY = prev.key;
@@ -119,6 +126,13 @@ export async function checkStep(n) {
     for (const [name, content] of Object.entries(expect.files || {})) {
       const p = join(workdir, name);
       if (!existsSync(p) || readFileSync(p, "utf-8") !== content) tag(lang, `file ${name} not written with expected content`);
+    }
+    // session persistence (ch4): the session file exists, and --resume actually
+    // restored the prior conversation (the original first user message is back).
+    if (expect.sessionFile && !existsSync(join(workdir, expect.sessionFile))) tag(lang, `session file ${expect.sessionFile} not written`);
+    if (expect.resumedFirstUser) {
+      const last = requests[requests.length - 1];
+      if (!last || !(last.firstUserText || "").includes(expect.resumedFirstUser)) tag(lang, `resume didn't restore prior context (last request first user: "${last?.firstUserText}")`);
     }
     rmSync(workdir, { recursive: true, force: true });
   }

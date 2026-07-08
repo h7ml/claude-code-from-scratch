@@ -1,6 +1,9 @@
 import * as readline from "readline";
 import { pathToFileURL } from "url";
 import { Agent } from "./agent.js";
+//#step >=4
+import { saveSession, loadSession } from "./session.js";
+//#endstep
 
 // A tiny REPL: read a line, hand it to the agent, repeat. One-shot mode runs a
 // single prompt from argv and exits (handy for scripts and testing). Exported as
@@ -12,9 +15,22 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   }
 
   const agent = new Agent();
+//#step >=4
+  // --resume: reload the saved conversation before doing anything else.
+  const resume = argv.includes("--resume");
+  argv = argv.filter((a) => a !== "--resume");
+  if (resume) {
+    const saved = loadSession();
+    if (saved) { agent.loadHistory(saved as any); console.log(`(resumed ${saved.length} messages)`); }
+  }
+//#endstep
+
   const oneShot = argv.join(" ").trim();
   if (oneShot) {
     await agent.chat(oneShot);
+//#step >=4
+    saveSession(agent.history());
+//#endstep
     return;
   }
 
@@ -25,7 +41,13 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       rl.question("you: ", async (line) => {
         const input = line.trim();
         if (input === "exit" || input === "quit") { rl.close(); resolve(); return; }
+//#step >=4
+        if (input === "/clear") { agent.clearHistory(); saveSession(agent.history()); console.log("(history cleared)"); ask(); return; }
+//#endstep
         if (input) await agent.chat(input);
+//#step >=4
+        if (input) saveSession(agent.history());
+//#endstep
         ask();
       });
     };

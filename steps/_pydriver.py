@@ -3,11 +3,14 @@
 Usage: _pydriver.py <pyStepDir> <scenarioPath> <logPath> <workdir>
 
 Sets up a temp workspace, starts the mock in-thread (same process, so loopback
-works everywhere), points the real Anthropic SDK at it via env, imports the
-step's Agent, and runs the scenario's prompt. Writes the mock event log for the
-test harness to assert on. Prints the agent's stdout (used for demos).
+works everywhere), points the real Anthropic SDK at it via env, and runs the
+scenario. A scenario is either chat mode ({prompt}) — import the Agent and call
+.chat() — or CLI mode ({runs: [{argv}, ...]}) — import the CLI entry and call
+main(argv) once per run, sharing one mock and workdir (so session save/resume
+works). Writes the mock event log for the test harness to assert on.
 """
 
+import importlib.util
 import json
 import os
 import sys
@@ -34,9 +37,19 @@ def main() -> None:
     os.environ["ANTHROPIC_API_KEY"] = "test"
 
     sys.path.insert(0, py_step_dir)
-    import agent  # the step's agent.py
 
-    agent.Agent().chat(scenario["prompt"])
+    if scenario.get("runs"):
+        # CLI mode: load __main__.py under a non-__main__ name so its guard
+        # doesn't auto-run, then call main(argv) once per run.
+        spec = importlib.util.spec_from_file_location("stepcli", os.path.join(py_step_dir, "__main__.py"))
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        for run in scenario["runs"]:
+            cli.main(run["argv"])
+    else:
+        import agent  # the step's agent.py
+        agent.Agent().chat(scenario["prompt"])
+
     close()
 
 

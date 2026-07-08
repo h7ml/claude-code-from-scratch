@@ -72,3 +72,14 @@ class Agent:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "content": output})
             self.messages.append({"role": "user", "content": results})
 #endregion
+#step >=4
+    # Session support: expose the history so the CLI can save it and restore it.
+    def history(self):
+        return self.messages
+
+    def load_history(self, messages) -> None:
+        self.messages = messages
+
+    def clear_history(self) -> None:
+        self.messages = []
+#endstep

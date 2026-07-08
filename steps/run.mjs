@@ -27,6 +27,7 @@ const STEP_INFO = {
   1: "agent loop — talk to the model and call one tool (read_file)",
   2: "tools — read, write, edit, list, grep, run shell",
   3: "system prompt — behave like a coding agent",
+  4: "CLI & sessions — arg parsing, /clear, save & --resume a conversation",
 };
 
 const args = process.argv.slice(2);
@@ -97,7 +98,8 @@ const workdir = mkdtempSync(join(tmpdir(), `stepdemo-${n}-`));
 for (const [f, c] of Object.entries(scenario.setup?.files || {})) { const p = join(workdir, f); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, c); }
 
 console.log(`▶ step ${n} demo (no API key — local mock model)   sandbox: ${workdir}`);
-console.log(`  you: ${scenario.prompt}\n`);
+if (scenario.runs) { for (const r of scenario.runs) console.log(`  $ mini-claude ${r.argv.join(" ")}`); console.log(); }
+else console.log(`  you: ${scenario.prompt}\n`);
 
 // After the run, show a real check of the side effect so it isn't just talk.
 function verify() {
@@ -116,16 +118,22 @@ if (usePy) {
   process.exit(r.status ?? 0);
 }
 
-// TS demo: in-process mock + the step's real Agent.
+// TS demo: in-process mock + the step's real code (CLI for runs, Agent for chat).
 const tsDir = join(DIST, name, "ts");
 const tsc = join(REPO, "node_modules", ".bin", "tsc");
-const b = spawnSync(tsc, ["--module", "nodenext", "--moduleResolution", "nodenext", "--target", "es2022", "--skipLibCheck", "--outDir", tsDir, join(tsDir, "agent.ts")], { encoding: "utf-8" });
+const entry = scenario.runs ? "cli.ts" : "agent.ts";
+const b = spawnSync(tsc, ["--module", "nodenext", "--moduleResolution", "nodenext", "--target", "es2022", "--skipLibCheck", "--outDir", tsDir, join(tsDir, entry)], { encoding: "utf-8" });
 if (b.status !== 0) { console.error(b.stdout + b.stderr); process.exit(1); }
 const mock = await startMock({ scenario, logPath: join(workdir, "_events.jsonl") });
 process.env.ANTHROPIC_BASE_URL = mock.url; process.env.ANTHROPIC_API_KEY = "test";
 process.chdir(workdir);
-const mod = await import(pathToFileURL(join(tsDir, "agent.js")).href);
-await new mod.Agent().chat(scenario.prompt);
+if (scenario.runs) {
+  const mod = await import(pathToFileURL(join(tsDir, "cli.js")).href);
+  for (const r of scenario.runs) await mod.runCli(r.argv);
+} else {
+  const mod = await import(pathToFileURL(join(tsDir, "agent.js")).href);
+  await new mod.Agent().chat(scenario.prompt);
+}
 await mock.close();
 verify();
 process.exit(0);

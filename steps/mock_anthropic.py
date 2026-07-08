@@ -85,9 +85,12 @@ def start_mock(scenario, log_path=None):
                             c = b.get("content")
                             tool_results.append({"tool_use_id": b.get("tool_use_id"),
                                                  "content": c if isinstance(c, str) else json.dumps(c)})
+            first_user = next((m for m in body.get("messages", []) if m.get("role") == "user"), None)
+            first_user_text = first_user["content"] if first_user and isinstance(first_user.get("content"), str) else ""
             log({"type": "request", "req": req_index, "turnIndex": assistant_count,
                  "system": sys_text, "tools": [t["name"] for t in body.get("tools", [])],
-                 "toolResults": tool_results, "stream": bool(body.get("stream"))})
+                 "toolResults": tool_results, "messageCount": len(body.get("messages", [])),
+                 "firstUserText": first_user_text, "stream": bool(body.get("stream"))})
 
             if turn is None:
                 log({"type": "exhausted", "req": req_index, "turnIndex": assistant_count})
