@@ -28,6 +28,7 @@ const STEPS = [
   { n: 6, name: "06-permissions" },
   { n: 7, name: "07-context" },
   { n: 8, name: "08-memory" },
+  { n: 9, name: "09-skills" },
 ];
 
 // Each file, and the first step at which it exists.
@@ -41,6 +42,7 @@ const FILES = {
     { file: "permissions.ts", from: 6 },
     { file: "context.ts", from: 7 },
     { file: "memory.ts", from: 8 },
+    { file: "skills.ts", from: 9 },
   ],
   py: [
     { file: "agent.py", from: 1 },
@@ -51,6 +53,7 @@ const FILES = {
     { file: "permissions.py", from: 6 },
     { file: "context.py", from: 7 },
     { file: "memory.py", from: 8 },
+    { file: "skills.py", from: 9 },
   ],
 };
 

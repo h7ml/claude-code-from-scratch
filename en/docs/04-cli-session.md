@@ -39,7 +39,7 @@ Last chapter's agent started blank every time — close the process and everythi
 +import { saveSession, loadSession } from "./session.js";
  
  // A tiny REPL: read a line, hand it to the agent, repeat. One-shot mode runs a
-@@ -13,8 +14,16 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
+@@ -13,4 +14,11 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
  
    const agent = new Agent();
 +  // --resume: reload the saved conversation before doing anything else.
@@ -51,12 +51,13 @@ Last chapter's agent started blank every time — close the process and everythi
 +  }
  
    const oneShot = argv.join(" ").trim();
-   if (oneShot) {
-     await agent.chat(oneShot);
+@@ -18,4 +26,5 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
+     const input = oneShot;
+     await agent.chat(input);
 +    saveSession(agent.history());
      return;
    }
-@@ -27,5 +36,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
+@@ -28,5 +37,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
          const input = line.trim();
          if (input === "exit" || input === "quit") { rl.close(); resolve(); return; }
 +        if (input === "/clear") { agent.clearHistory(); saveSession(agent.history()); console.log("(history cleared)"); ask(); return; }

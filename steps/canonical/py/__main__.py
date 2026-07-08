@@ -5,6 +5,9 @@ from agent import Agent
 #step >=4
 from session import save_session, load_session
 #endstep
+#step >=9
+from skills import resolve_skill
+#endstep
 
 
 # A tiny REPL: read a line, hand it to the agent, repeat. One-shot mode runs a
@@ -31,7 +34,13 @@ def main(argv=None) -> None:
 
     one_shot = " ".join(argv).strip()
     if one_shot:
-        agent.chat(one_shot)
+#step >=9
+        # "/name ..." runs a skill's prompt template; anything else is a message.
+        text = resolve_skill(one_shot) or one_shot
+#step <=8
+        text = one_shot
+#endstep
+        agent.chat(text)
 #step >=4
         save_session(agent.history())
 #endstep
@@ -53,9 +62,15 @@ def main(argv=None) -> None:
             print("(history cleared)")
             continue
 #endstep
+#step >=9
+        if line:
+            agent.chat(resolve_skill(line) or line)
+#step <=8
         if line:
             agent.chat(line)
+#endstep
 #step >=4
+        if line:
             save_session(agent.history())
 #endstep
 

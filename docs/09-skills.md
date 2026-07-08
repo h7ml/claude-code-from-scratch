@@ -26,9 +26,85 @@ graph TB
     style Inject fill:#e8e0ff
 ```
 
+> ▶ **跑这一章**：`node steps/run.mjs 9`（无需 API key）——看 `/commit` 调起一个技能。加 `--diff` 看它比上一章多了什么。
+
 ---
 
 ## 我们的实现
+
+有些提示词会反复用到——「读 diff、写 commit message」这套，每次手打一遍很烦。这一章给 agent 造技能：把这类 prompt 存成文件，`/commit` 一声就调起来，像 shell 脚本一样即装即用。相对上一章，新增了一个 `skills.ts`，CLI 收到 `/name` 就把它换成那个技能的 prompt：
+
+<!-- @diff file=cli.ts step=9 lang=ts -->
+```diff
+@@ -3,4 +3,5 @@ import { pathToFileURL } from "url";
+ import { Agent } from "./agent.js";
+ import { saveSession, loadSession } from "./session.js";
++import { resolveSkill } from "./skills.js";
+ 
+ // A tiny REPL: read a line, hand it to the agent, repeat. One-shot mode runs a
+@@ -24,5 +25,6 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
+   const oneShot = argv.join(" ").trim();
+   if (oneShot) {
+-    const input = oneShot;
++    // "/name ..." runs a skill's prompt template; anything else is a plain message.
++    const input = resolveSkill(oneShot) ?? oneShot;
+     await agent.chat(input);
+     saveSession(agent.history());
+@@ -38,5 +40,5 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
+         if (input === "exit" || input === "quit") { rl.close(); resolve(); return; }
+         if (input === "/clear") { agent.clearHistory(); saveSession(agent.history()); console.log("(history cleared)"); ask(); return; }
+-        if (input) await agent.chat(input);
++        if (input) await agent.chat(resolveSkill(input) ?? input);
+         if (input) saveSession(agent.history());
+         ask();
+```
+<!-- @enddiff -->
+
+一个技能就是一个文件；解析就是「以 `/` 开头就去 `.mini-skills/` 找同名文件，读出它的 prompt」：
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=skills.ts region=skill step=9 -->
+```typescript
+export function resolveSkill(input: string): string | null {
+  if (!input.startsWith("/")) return null;
+  const [name, ...rest] = input.slice(1).split(" ");
+  const file = join(SKILLS_DIR, `${name}.md`);
+  if (!existsSync(file)) return null;
+  const prompt = readFileSync(file, "utf-8").trim();
+  const args = rest.join(" ").trim();
+  return args ? `${prompt}\n\n${args}` : prompt;
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=skills.py region=skill step=9 -->
+```python
+def resolve_skill(text):
+    if not text.startswith("/"):
+        return None
+    name, _, rest = text[1:].partition(" ")
+    path = os.path.join(SKILLS_DIR, f"{name}.md")
+    if not os.path.exists(path):
+        return None
+    prompt = open(path, encoding="utf-8").read().strip()
+    args = rest.strip()
+    return f"{prompt}\n\n{args}" if args else prompt
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+跑一下，`.mini-skills/commit.md` 里存着一段写 commit 的提示词，`/commit` 就把它调起来：
+
+<!-- @transcript step=9 lang=ts -->
+```
+$ node steps/run.mjs 9
+▶ step 9 demo (no API key — local mock model)   sandbox: <sandbox>
+  $ mini-claude /commit
+
+feat: add the new thing
+```
+<!-- @endtranscript -->
 
 ### SKILL.md 格式
 

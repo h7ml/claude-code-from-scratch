@@ -126,6 +126,8 @@ export async function checkStep(n) {
     // aux tracks (ch7 compaction, ch15 goal/classifier): the side call really happened
     for (const t of expect.tracksUsed || []) if (!requests.some((e) => e.track === t)) tag(lang, `no request on track "${t}" (the ${t} aux call didn't happen)`);
     if (expect.stdoutContains && !stdout.includes(expect.stdoutContains)) tag(lang, `stdout missing ${JSON.stringify(expect.stdoutContains)}`);
+    // a request's first user message carries what we injected (ch9 skill prompt)
+    if (expect.firstUserContains && !requests.some((e) => (e.firstUserText || "").includes(expect.firstUserContains))) tag(lang, `no request first-user text contained ${JSON.stringify(expect.firstUserContains)}`);
     // file side effects
     for (const [name, content] of Object.entries(expect.files || {})) {
       const p = join(workdir, name);

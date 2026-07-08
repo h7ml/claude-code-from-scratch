@@ -4,6 +4,9 @@ import { Agent } from "./agent.js";
 //#step >=4
 import { saveSession, loadSession } from "./session.js";
 //#endstep
+//#step >=9
+import { resolveSkill } from "./skills.js";
+//#endstep
 
 // A tiny REPL: read a line, hand it to the agent, repeat. One-shot mode runs a
 // single prompt from argv and exits (handy for scripts and testing). Exported as
@@ -27,7 +30,13 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
   const oneShot = argv.join(" ").trim();
   if (oneShot) {
-    await agent.chat(oneShot);
+//#step >=9
+    // "/name ..." runs a skill's prompt template; anything else is a plain message.
+    const input = resolveSkill(oneShot) ?? oneShot;
+//#step <=8
+    const input = oneShot;
+//#endstep
+    await agent.chat(input);
 //#step >=4
     saveSession(agent.history());
 //#endstep
@@ -44,7 +53,11 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 //#step >=4
         if (input === "/clear") { agent.clearHistory(); saveSession(agent.history()); console.log("(history cleared)"); ask(); return; }
 //#endstep
+//#step >=9
+        if (input) await agent.chat(resolveSkill(input) ?? input);
+//#step <=8
         if (input) await agent.chat(input);
+//#endstep
 //#step >=4
         if (input) saveSession(agent.history());
 //#endstep

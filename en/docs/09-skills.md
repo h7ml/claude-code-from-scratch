@@ -26,9 +26,85 @@ graph TB
     style Inject fill:#e8e0ff
 ```
 
+> ▶ **Run this chapter**: `node steps/run.mjs 9` (no API key) — watch `/commit` invoke a skill. Add `--diff` to see what it added over the previous chapter.
+
 ---
 
 ## Our Implementation
+
+Some prompts get reused constantly — the "read the diff, write a commit message" routine is tedious to retype. This chapter gives the agent skills: save such a prompt as a file and invoke it with `/commit`, install-and-use like a shell script. Relative to last chapter, it adds a `skills.ts`, and the CLI turns a `/name` into that skill's prompt:
+
+<!-- @diff file=cli.ts step=9 lang=ts -->
+```diff
+@@ -3,4 +3,5 @@ import { pathToFileURL } from "url";
+ import { Agent } from "./agent.js";
+ import { saveSession, loadSession } from "./session.js";
++import { resolveSkill } from "./skills.js";
+ 
+ // A tiny REPL: read a line, hand it to the agent, repeat. One-shot mode runs a
+@@ -24,5 +25,6 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
+   const oneShot = argv.join(" ").trim();
+   if (oneShot) {
+-    const input = oneShot;
++    // "/name ..." runs a skill's prompt template; anything else is a plain message.
++    const input = resolveSkill(oneShot) ?? oneShot;
+     await agent.chat(input);
+     saveSession(agent.history());
+@@ -38,5 +40,5 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
+         if (input === "exit" || input === "quit") { rl.close(); resolve(); return; }
+         if (input === "/clear") { agent.clearHistory(); saveSession(agent.history()); console.log("(history cleared)"); ask(); return; }
+-        if (input) await agent.chat(input);
++        if (input) await agent.chat(resolveSkill(input) ?? input);
+         if (input) saveSession(agent.history());
+         ask();
+```
+<!-- @enddiff -->
+
+A skill is just a file; resolving one is "if it starts with `/`, find the same-named file under `.mini-skills/` and read its prompt":
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=skills.ts region=skill step=9 -->
+```typescript
+export function resolveSkill(input: string): string | null {
+  if (!input.startsWith("/")) return null;
+  const [name, ...rest] = input.slice(1).split(" ");
+  const file = join(SKILLS_DIR, `${name}.md`);
+  if (!existsSync(file)) return null;
+  const prompt = readFileSync(file, "utf-8").trim();
+  const args = rest.join(" ").trim();
+  return args ? `${prompt}\n\n${args}` : prompt;
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=skills.py region=skill step=9 -->
+```python
+def resolve_skill(text):
+    if not text.startswith("/"):
+        return None
+    name, _, rest = text[1:].partition(" ")
+    path = os.path.join(SKILLS_DIR, f"{name}.md")
+    if not os.path.exists(path):
+        return None
+    prompt = open(path, encoding="utf-8").read().strip()
+    args = rest.strip()
+    return f"{prompt}\n\n{args}" if args else prompt
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+Run it: `.mini-skills/commit.md` holds a commit-writing prompt, and `/commit` invokes it:
+
+<!-- @transcript step=9 lang=ts -->
+```
+$ node steps/run.mjs 9
+▶ step 9 demo (no API key — local mock model)   sandbox: <sandbox>
+  $ mini-claude /commit
+
+feat: add the new thing
+```
+<!-- @endtranscript -->
 
 ### SKILL.md Format
 

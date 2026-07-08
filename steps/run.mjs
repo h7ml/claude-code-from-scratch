@@ -32,6 +32,7 @@ const STEP_INFO = {
   6: "permissions — a gate checks each tool call; dangerous shell commands are blocked",
   7: "context — when the history grows too long, older messages are summarized (compacted)",
   8: "memory — recall facts saved across sessions and inject them into the prompt",
+  9: "skills — /name runs a reusable prompt template loaded from a file",
 };
 
 const args = process.argv.slice(2);

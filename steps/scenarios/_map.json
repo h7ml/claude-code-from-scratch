@@ -97,5 +97,13 @@
       "systemContains": "staging.example.com",
       "finalStopReason": "end_turn"
     }
+  },
+  "9": {
+    "scenario": "invoke-skill",
+    "expect": {
+      "toolCalls": [],
+      "firstUserContains": "commit message",
+      "finalStopReason": "end_turn"
+    }
   }
 }
