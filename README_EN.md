@@ -3,9 +3,9 @@
 [![GitHub stars](https://img.shields.io/github/stars/Windy3f3f3f3f/claude-code-from-scratch?style=social)](https://github.com/Windy3f3f3f3f/claude-code-from-scratch)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](#)
-[![Lines of Code](https://img.shields.io/badge/~4300_lines-minimal-green)](#)
+[![Lines of Code](https://img.shields.io/badge/~5000_lines-minimal-green)](#)
 
-> Build Claude Code from scratch, step by step
+> **Hand-write a Claude Code from scratch, step by step**
 
 <p align="center">
   <a href="https://windy3f3f3f3f.github.io/claude-code-from-scratch/#/en/"><strong>📘 Read Tutorial Online →</strong></a>
@@ -17,20 +17,22 @@
 
 ---
 
-**Claude Code open-sourced 500K lines of TypeScript. Too much to read?**
+> ⚖️ **Disclaimer**: This is a learning project that rewrites Claude Code's core from scratch, following Claude Code's publicly observable behavior and common agent patterns. It makes **no guarantee** of matching Claude Code's real internal implementation. "Claude Code" is a trademark of Anthropic; this project is not affiliated with Anthropic.
 
-This project recreates Claude Code's core architecture in **~4300 lines** — Agent Loop, 13 tools (with parallel + streaming execution), 4-tier context compression, semantic memory recall, skills, multi-agent, MCP integration — with each step comparing the real source to our simplified version.
+**Claude Code runs to hundreds of thousands of lines. Too much to read?**
 
-This isn't a demo — it's a **step-by-step tutorial**. Follow along, write a few thousand lines of code yourself, and quickly grasp the essence of the best coding agent out there. No need to wade through hundreds of thousands of lines.
+This project rewrites the core of Claude Code from scratch in **~5000 lines** (TypeScript and Python versions): Agent Loop, 13 tools (parallel + streaming execution), 4-tier context compression, semantic memory recall, skills, multi-agent, MCP integration. It follows Claude Code's publicly observable behavior, and each step spells out where it differs from the real thing.
+
+This isn't a demo — it's a **step-by-step tutorial**. Follow along, write a few thousand lines yourself, and you'll grasp how a Coding Agent actually works without wading through hundreds of thousands of lines. And every code chapter runs with a single command and no API key (see the "Every Chapter Runs" section below).
 
 <video src="https://github.com/user-attachments/assets/4f6597e2-6ea3-45ae-8a6b-77662c4e9540" width="100%" autoplay loop muted playsinline></video>
 
 ## Step-by-Step Tutorial
 
-13 chapters in two phases — first build a working Coding Agent, then add advanced capabilities. Each chapter includes real code + Claude Code source comparison:
+13 chapters in two phases — first build a working Coding Agent, then add advanced capabilities. Each chapter includes runnable real code + an architectural comparison with Claude Code:
 
-| Chapter | Content | Source Mapping |
-|---------|---------|---------------|
+| Chapter | Content | Architectural Reference |
+|---------|---------|------------------------|
 | **Phase 1: Build a Working Coding Agent** | | |
 | [1. Agent Loop](https://windy3f3f3f3f.github.io/claude-code-from-scratch/#/en/docs/01-agent-loop) | Core loop: call LLM → execute tools → repeat | `agent.ts` ↔ `query.ts` |
 | [2. Tool System](https://windy3f3f3f3f.github.io/claude-code-from-scratch/#/en/docs/02-tools) | 13 tools + mtime guard + deferred loading | `tools.ts` ↔ `Tool.ts` + 66 tools |
@@ -46,6 +48,19 @@ This isn't a demo — it's a **step-by-step tutorial**. Follow along, write a fe
 | [11. Multi-Agent](https://windy3f3f3f3f.github.io/claude-code-from-scratch/#/en/docs/11-multi-agent) | Sub-Agent fork-return architecture | `subagent.ts` ↔ `AgentTool/` |
 | [12. MCP Integration](https://windy3f3f3f3f.github.io/claude-code-from-scratch/#/en/docs/12-mcp) | JSON-RPC over stdio for external tools | `mcp.ts` ↔ `mcpClient.ts` |
 | [13. Comparison](https://windy3f3f3f3f.github.io/claude-code-from-scratch/#/en/docs/13-whats-next) | Full comparison + extension ideas | Global |
+
+## ▶ Every Chapter Runs (No API Key)
+
+The worst thing about reading code is when you can't run it — change a line and you have no idea whether it's right. So every code chapter comes with a runnable minimal implementation: one command, no API key, and you watch it actually work.
+
+```bash
+node steps/run.mjs --list     # list every runnable step
+node steps/run.mjs 7          # run chapter 7: as the history grows, it summarizes old messages
+node steps/run.mjs 7 --diff   # just the lines this chapter added over the previous one
+node steps/run.mjs 7 --py     # the Python version
+```
+
+The output is real (driven by a local mock model, offline), and `--diff` shows exactly the code this chapter introduced. To drive it with your own prompt against a real model, add `--live`. Each chapter's code, the snippets embedded in the docs, and that captured output are all generated from one source — so the docs can never say something the code doesn't do.
 
 ## Quick Start
 
@@ -145,7 +160,7 @@ mini-claude-py               # Launch directly
 
 | Aspect | Claude Code | Mini Claude Code |
 |--------|------------|-----------------|
-| Purpose | Production coding agent | Educational / minimal |
+| Purpose | Production coding agent | Learning / minimal |
 | Tools | 66+ built-in | 13 tools (6 core + web_fetch + tool_search + skill + agent + plan mode) |
 | Tool Execution | Concurrent + streaming early start | Parallel + streaming early start |
 | Context | 4-level compression pipeline | 4-tier compression + large result persistence (>30KB) |
@@ -156,7 +171,7 @@ mini-claude-py               # Launch directly
 | Multi-Agent | Sub-Agent + Coordinator + Swarm | Sub-Agent (3 built-in + custom agents) |
 | MCP Integration | mcpClient.ts + dynamic tool discovery | McpManager + JSON-RPC over stdio |
 | Budget Control | USD/turns/abort | USD + turn limits |
-| Code Size | 500k+ lines | ~4300 lines (TS) / ~3800 lines (Python) |
+| Code Size | 500k+ lines | ~5500 lines (TS) / ~5000 lines (Python) |
 
 ## Core Capabilities
 
@@ -180,19 +195,26 @@ mini-claude-py               # Launch directly
 ## Project Structure
 
 ```
-src/
-├── agent.ts        # Agent loop: streaming, parallel exec, 4-tier compress  (1501 lines)
-├── tools.ts        # Tools: 13 tools + mtime guard + deferred loading       (858 lines)
-├── cli.ts          # CLI entry: args, REPL, budget flags                    (371 lines)
-├── memory.ts       # Memory: 4 types + semantic recall + async prefetch     (376 lines)
-├── mcp.ts          # MCP client: JSON-RPC over stdio                        (266 lines)
-├── prompt.ts       # System prompt: @include + template + injection         (230 lines)
-├── ui.ts           # Terminal output: colors, formatting, sub-agent         (211 lines)
+src/                # TypeScript version
+├── agent.ts        # Agent loop: streaming, parallel exec, 4-tier compress  (2169 lines)
+├── tools.ts        # Tools: 13 tools + mtime guard + deferred loading       (884 lines)
+├── autonomy.ts     # Autonomy: /goal evaluator + /loop + Auto Mode classifier (464 lines)
+├── cli.ts          # CLI entry: args, REPL, budget flags                    (416 lines)
+├── memory.ts       # Memory: 4 types + semantic recall + async prefetch     (392 lines)
+├── mcp.ts          # MCP client: JSON-RPC over stdio                        (277 lines)
+├── prompt.ts       # System prompt: @include + template + injection         (253 lines)
+├── ui.ts           # Terminal output: colors, formatting, sub-agent         (215 lines)
 ├── subagent.ts     # Sub-agent: 3 built-in + custom agent discovery         (199 lines)
 ├── skills.ts       # Skills system: discovery + inline/fork modes           (175 lines)
 ├── session.ts      # Session persistence: save/load/list                    (63 lines)
 ├── frontmatter.ts  # Shared YAML frontmatter parser                         (41 lines)
-                                                            Total: ~4291 lines
+                                                            Total: ~5500 lines
+python/             # Python version (feature-equivalent), ~5000 lines
+
+steps/              # Runnable minimal impl per chapter (one source → snapshots)
+├── canonical/{ts,py}   # teaching source of truth, sliced by #step markers
+├── run.mjs             # node steps/run.mjs <N> [--diff|--py|--live|--list]
+└── build.mjs, test.mjs # generate snapshots + verify every step with no key
 ```
 
 ## Related Projects

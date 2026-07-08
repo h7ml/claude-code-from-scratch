@@ -1,7 +1,7 @@
 # 13. Architecture Comparison and What's Next
 
-> ℹ️ **About the comparison tables in this chapter**: The "Architecture Comparison" and "File Mapping" below are meant to help readers build a conceptual correspondence between **our roughly 5,500-line (TS) / 5,000-line (Python) minimal implementation** and **a production-grade coding agent like Claude Code**.
-> This project is an **independent clean-room educational implementation** -- the code does not come from Claude Code's internal implementation, and all comparisons are analogies for learning and further research only. Specific details may differ from Claude Code's real internals.
+> ℹ️ **About the comparison tables in this chapter**: The "Architecture Comparison" and "File Mapping" below are meant to help readers build a conceptual correspondence between **our roughly 5,500-line (TS) / 5,000-line (Python) minimal implementation** and **the production-grade Claude Code**.
+> This project is a from-scratch learning implementation; all comparisons are for learning and further research only, and specific details may differ from Claude Code's real internals.
 
 Starting from Chapter 1's chat-only loop, we've built all the way up to an agent that reads code, edits files, runs tests, and even runs autonomously — the whole foundation is done. This chapter lays it side by side with the real Claude Code, to see what the minimal build left out, what the production one adds, and where to go from here.
 

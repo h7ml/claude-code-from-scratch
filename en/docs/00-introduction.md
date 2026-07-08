@@ -48,7 +48,7 @@ This table is the core build line. Each row is a chapter; the right side is what
 | 12. MCP Integration | connect external tool servers to extend the tool set |
 | 13. Architecture Comparison | line up against the real Claude Code and see where the minimal build differs |
 
-Two chapters sit beyond this line: Chapter 14 checks whether the agent really runs, with 19 manual scenarios; Chapter 15 adds the "autonomy" trio (`/goal`, `/loop`, Auto Mode), letting the agent keep pushing a task forward and judge permissions action by action.
+Two chapters sit beyond this line: Chapter 14 checks whether the agent really runs, with 22 manual scenarios; Chapter 15 adds the "autonomy" trio (`/goal`, `/loop`, Auto Mode), letting the agent keep pushing a task forward and judge permissions action by action.
 
 ## What It Looks Like When Finished
 

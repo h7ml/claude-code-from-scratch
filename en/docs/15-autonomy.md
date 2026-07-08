@@ -1,6 +1,6 @@
 # 15. Autonomy & Continuation (/goal · /loop · Auto Mode)
 
-> ℹ️ As in Chapter 13: mini-claude is an independent clean-room teaching implementation, and every comparison to Claude Code below is for learning only. Where a prompt is quoted verbatim from the leaked artifacts, the text says so; where we simplify or approximate, it says that too — we don't dress up a simplification as a faithful reproduction.
+> ℹ️ As in Chapter 13: mini-claude is a from-scratch learning implementation, and every comparison to Claude Code below is for learning only. Where a prompt is quoted verbatim from the leaked artifacts, the text says so; where we simplify or approximate, it says that too — we don't dress up a simplification as a faithful reproduction.
 
 ## Chapter Goals
 
