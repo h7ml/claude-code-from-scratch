@@ -39,7 +39,7 @@ graph LR
     style RF fill:#e8e0ff
 ```
 
-## Building the Tools
+## Our Implementation
 
 A tool is three things: a name, a description for the model, and a function that does the work. The first two go in a static array (already in the exact shape the API wants); the third is an ordinary function, dispatched by name through a switch. Definitions first, then execution, then a walk through each tool — with the focus on `edit_file`, the one tool in this chapter with a real trap in it.
 
@@ -818,7 +818,7 @@ The most underrated advantage of search-and-replace is **hallucination safety**:
 
 | Claude Code's Design | Our Simplification | Reason |
 |---------------------|-------------------|--------|
-| 66+ tool classes, each in its own directory | 1 file + 6 functions | Tutorial doesn't need industrial-grade modularity |
+| 66+ tool classes, each in its own directory | 1 `tools.ts` + a switch dispatcher (6 core functions + extension tools; `skill`/`agent` handled at the agent layer) | Tutorial doesn't need industrial-grade modularity |
 | 8-stage lifecycle | Direct switch dispatch + execution | Skip Hook, permission checks, classifier |
 | StreamingToolExecutor concurrency | Serial execution one by one | Avoid concurrency complexity |
 | 14-step validation pipeline | Uniqueness check + quote tolerance | Keep only the 2 most critical validations |

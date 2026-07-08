@@ -2,7 +2,7 @@
 
 ## Chapter Goals
 
-As Chapter 1 showed, the message array grows every turn. Run a few dozen turns and it eventually overflows the model's context window — and once it does, the API errors out and the whole turn breaks. This chapter builds context compression so the agent can keep going.
+By the end of last chapter the agent can read, write, and run commands safely — but one problem still can't be dodged, one that Chapter 1 already planted: the message array grows every turn. Run a few dozen turns and it eventually overflows the model's context window, and once it does, the API errors out and the whole turn breaks. This chapter builds context compression so the agent can keep going.
 
 Compression comes in four tiers, escalating from the lightest ("trim large tool outputs") to the heaviest ("have the model summarize the whole conversation into one paragraph"), reaching for the heavy one only when the light ones aren't enough. At the end it also wires up prefix caching — that static core split out in Chapter 3 is exactly what saves money here.
 
@@ -34,7 +34,7 @@ graph TD
 
 ## Our Implementation
 
-4-tier pipeline: execution-time truncation + Budget + Snip + Microcompact + Auto-compact.
+Built in layers: execution-time truncation (Tier 0) as the floor catching a single oversized output, with 4 compression tiers on top — Budget, Snip, Microcompact, Auto-compact — from lightest to heaviest; the first three run in order before each API call, and the heaviest, Auto-compact, fires at the turn boundary.
 
 ### Tier 0: Execution-Time Truncation (truncateResult)
 

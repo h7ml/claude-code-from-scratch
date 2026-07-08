@@ -425,7 +425,6 @@ def print_tool_result(name: str, result: str) -> None:
 
 Tool results are truncated to 500 characters at the UI layer -- this display is for humans; the complete result is already in the message history.
 
-> **Next chapter**: Making the Agent's output appear in real time -- streaming output and dual-backend support.
 ## What the Real Claude Code Does Beyond This
 
 Our interface is a readline plus a few print calls. Claude Code's is a whole UI framework running in the terminal — the gap is all in making it stable, pleasant, and crash-proof in a real terminal.
@@ -460,3 +459,7 @@ Whole-JSON overwrite has two problems: a crash mid-write corrupts the entire fil
 
 JSONL appends one line per turn, O(1) writes, and a crash loses at most the last line. The filesystem's append operation is typically atomic. Recovery parses line by line, skipping any incomplete line at the end.
 
+
+---
+
+> **Next chapter**: Making the agent's output appear in real time -- streaming output and dual-backend support.

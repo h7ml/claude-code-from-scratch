@@ -8,12 +8,14 @@ Start with a few hardcoded checks for dangerous commands, then make it configura
 
 ```mermaid
 graph TB
-    Call[Tool call] --> Mode{Permission mode check}
+    Call[Tool call] --> Deny{deny rule hit?}
+    Deny -->|Yes| Block[Block directly<br/>Return denied to model]
+    Deny -->|No| Plan{plan mode + write/shell?}
+    Plan -->|Yes| Block
+    Plan -->|No| Mode{Permission mode}
     Mode -->|bypassPermissions| Exec[Execute directly]
-    Mode -->|plan/dontAsk/...| Rules{Permission rule matching}
-    Rules -->|deny hit| Block[Block directly<br/>Return denied to model]
-    Rules -->|allow hit| Exec
-    Rules -->|No match| Builtin{Built-in danger pattern check}
+    Mode -->|allow rule hit| Exec
+    Mode -->|Other| Builtin{Built-in danger pattern check}
     Builtin -->|Safe| Exec
     Builtin -->|Dangerous| WL{Session whitelist?}
     WL -->|Authorized| Exec
@@ -22,13 +24,13 @@ graph TB
     AddWL --> Exec
     Confirm -->|n| Block2[Return denied]
 
-    style Mode fill:#4a3aad,color:#fff
-    style Rules fill:#7c5cfc,color:#fff
+    style Deny fill:#4a3aad,color:#fff
+    style Mode fill:#7c5cfc,color:#fff
     style Builtin fill:#e8e0ff
     style Block fill:#ff6b6b,color:#fff
 ```
 
-Core approach: **Multi-layer checks, deny takes priority**. Permission mode (global policy) -> config file rules (Layer 1) -> built-in danger pattern detection (Layer 2) -> session whitelist -> user confirmation.
+Core approach: **deny takes priority, and even `--yolo` can't get past it**. deny rules first, then plan mode's read-only contract, and only then bypass / allow rules / built-in danger detection / session whitelist / user confirmation.
 
 ## Our Implementation
 
@@ -314,21 +316,13 @@ export function checkPermission(
   mode: PermissionMode = "default",
   planFilePath?: string
 ): { action: "allow" | "deny" | "confirm"; message?: string } {
-  if (mode === "bypassPermissions") return { action: "allow" };
-
-  // Layer 1: Config file rules (deny takes priority)
+  // Step 1: deny rules always win -- even --yolo (bypassPermissions) can't get past them
   const ruleResult = checkPermissionRules(toolName, input);
   if (ruleResult === "deny") {
     return { action: "deny", message: `Denied by permission rule for ${toolName}` };
   }
-  if (ruleResult === "allow") {
-    return { action: "allow" };
-  }
 
-  // Read tools are always safe
-  if (READ_TOOLS.has(toolName)) return { action: "allow" };
-
-  // Permission mode check
+  // Step 2: plan mode's read-only contract beats allow rules and bypass
   if (mode === "plan") {
     if (EDIT_TOOLS.has(toolName)) {
       const filePath = input.file_path || input.path;
@@ -339,6 +333,14 @@ export function checkPermission(
       return { action: "deny", message: "Shell commands blocked in plan mode" };
     }
   }
+
+  // --yolo: once deny and plan have passed, allow everything else
+  if (mode === "bypassPermissions") return { action: "allow" };
+
+  if (ruleResult === "allow") return { action: "allow" };
+
+  // Read tools are always safe
+  if (READ_TOOLS.has(toolName)) return { action: "allow" };
 
   if (mode === "acceptEdits" && EDIT_TOOLS.has(toolName)) {
     return { action: "allow" };
@@ -536,6 +538,8 @@ async def _confirm_dangerous(self, command: str) -> bool:
 | `bypassPermissions` | ✅ | ✅ | ✅ | ✅ | --yolo |
 | `dontAsk` | ✅ | ❌ deny | ✅ | ❌ deny | CI/non-interactive |
 
+(There's also a 6th, `auto` — Auto Mode, which uses a classifier to judge permissions action by action; it's added later in [Chapter 15](15-autonomy.md).)
+
 ```bash
 mini-claude --yolo "..."           # bypassPermissions
 mini-claude --plan "..."           # plan mode
@@ -596,7 +600,7 @@ Rules from both files are merged and take effect together. Rule format:
 
 ## What the Real Claude Code Does Beyond This
 
-Our permissions are three layers: deny rules, mode shortcuts, and built-in dangerous-command checks plus confirmation. The real Claude Code is seven — and what those extra layers add is taking "even if one layer is bypassed, the others still hold" all the way.
+We compressed it into four pieces: permission rules, permission modes, built-in danger detection, and session confirmation plus whitelist. The real Claude Code is seven layers of defense in depth — and what those extra layers add is taking "even if one layer is bypassed, the others still hold" all the way.
 
 Claude Code executes code in real environments -- reading and writing files, running shells, manipulating Git. Without proper security mechanisms, a single `rm -rf /` could cause disaster. That's why it employs Defense in Depth: 7 independent security layers, so even if one layer is bypassed, the others remain effective.
 
