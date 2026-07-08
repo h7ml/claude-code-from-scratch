@@ -30,7 +30,111 @@ graph TB
     style Result fill:#e8e0ff
 ```
 
+> ▶ **Run this chapter**: `node steps/run.mjs 11` (no API key) — watch the main agent send a sub-agent to check a file. Add `--diff` to see what it added over the previous chapter.
+
 ## Our Implementation
+
+Cram a big task into one agent and the context fills up fast. This chapter builds sub-agents: the main agent, through an `agent` tool, forks an independent sub-agent to chew on a sub-task — the sub-agent has its own clean context, runs a small read-only loop in-process (recursion), and brings back only the result. Relative to last chapter, it adds a `subagent.ts`, and the agent loop intercepts the `agent` tool:
+
+<!-- @diff file=agent.ts step=11 lang=ts -->
+```diff
+@@ -5,4 +5,5 @@ import { checkPermission } from "./permissions.js";
+ import { maybeCompact } from "./context.js";
+ import { recallMemories } from "./memory.js";
++import { runSubAgent } from "./subagent.js";
+ 
+ const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
+@@ -65,4 +66,10 @@ export class Agent {
+       for (const tu of toolUses) {
+         console.log(`  → ${tu.name}(${JSON.stringify(tu.input)})`);
++        // The `agent` tool forks a read-only sub-agent with its own context.
++        if (tu.name === "agent") {
++          const summary = await runSubAgent(String((tu.input as any).task || ""), this.client, MODEL);
++          results.push({ type: "tool_result", tool_use_id: tu.id, content: summary });
++          continue;
++        }
+         // Plan mode is read-only: writes and shell are denied on top of the gate.
+         const blocked = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
+```
+<!-- @enddiff -->
+
+A sub-agent is just a read-only mini-loop — give it only the read tools, and report back the final text when it is done:
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=subagent.ts region=subagent step=11 -->
+```typescript
+export async function runSubAgent(task: string, client: Anthropic, model: string): Promise<string> {
+  const messages: Anthropic.MessageParam[] = [{ role: "user", content: task }];
+  const tools = toolDefinitions.filter((t) => EXPLORE_TOOLS.includes(t.name));
+
+  while (true) {
+    const reply = await client.messages.create({
+      model, max_tokens: 4096,
+      system: "You are an explore sub-agent. Investigate read-only and report back a concise summary.",
+      tools, messages,
+    });
+    messages.push({ role: "assistant", content: reply.content });
+
+    const toolUses = reply.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
+    if (toolUses.length === 0) {
+      return reply.content.filter((b) => b.type === "text").map((b: any) => b.text).join("");
+    }
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const tu of toolUses) {
+      // Read-only: a sub-agent can look but not touch.
+      const output = EXPLORE_TOOLS.includes(tu.name)
+        ? await executeTool(tu.name, tu.input as Record<string, any>)
+        : `Denied: the sub-agent is read-only.`;
+      results.push({ type: "tool_result", tool_use_id: tu.id, content: output });
+    }
+    messages.push({ role: "user", content: results });
+  }
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=subagent.py region=subagent step=11 -->
+```python
+def run_sub_agent(task, client, model):
+    messages = [{"role": "user", "content": task}]
+    tools = [t for t in tool_definitions if t["name"] in EXPLORE_TOOLS]
+
+    while True:
+        reply = client.messages.create(
+            model=model, max_tokens=4096,
+            system="You are an explore sub-agent. Investigate read-only and report back a concise summary.",
+            tools=tools, messages=messages,
+        )
+        messages.append({"role": "assistant", "content": reply.content})
+
+        tool_uses = [b for b in reply.content if b.type == "tool_use"]
+        if not tool_uses:
+            return "".join(b.text for b in reply.content if b.type == "text")
+        results = []
+        for tu in tool_uses:
+            # Read-only: a sub-agent can look but not touch.
+            output = execute_tool(tu.name, tu.input) if tu.name in EXPLORE_TOOLS \
+                else "Denied: the sub-agent is read-only."
+            results.append({"type": "tool_result", "tool_use_id": tu.id, "content": output})
+        messages.append({"role": "user", "content": results})
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+Run it: the main agent sends a sub-agent to read `greeting.txt`, the sub-agent reports back, and the main agent answers:
+
+<!-- @transcript step=11 lang=ts -->
+```
+$ node steps/run.mjs 11
+▶ step 11 demo (no API key — local mock model)   sandbox: <sandbox>
+  you: Use a sub-agent to find out what greeting.txt says.
+
+
+  → agent({"task":"Read greeting.txt and report its contents."})
+The sub-agent reports greeting.txt says: hello from the subagent demo.
+```
+<!-- @endtranscript -->
 
 With **~199 lines** in `subagent.ts` plus minor changes to the Agent class, we implement the core of the Sub-Agent pattern.
 

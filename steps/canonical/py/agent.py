@@ -16,6 +16,9 @@ from context import maybe_compact
 #step >=8
 from memory import recall_memories
 #endstep
+#step >=11
+from subagent import run_sub_agent
+#endstep
 
 MODEL = os.environ.get("MINI_MODEL", "claude-sonnet-4-5-20250929")
 
@@ -94,6 +97,13 @@ class Agent:
             results = []
             for tu in tool_uses:
                 print(f"  → {tu.name}({json.dumps(tu.input)})")
+#step >=11
+                # The `agent` tool forks a read-only sub-agent with its own context.
+                if tu.name == "agent":
+                    summary = run_sub_agent(tu.input.get("task", ""), self.client, MODEL)
+                    results.append({"type": "tool_result", "tool_use_id": tu.id, "content": summary})
+                    continue
+#endstep
 #step >=10
                 # Plan mode is read-only: writes and shell are denied on top of the gate.
                 blocked = check_permission(tu.name, tu.input) == "deny" or (

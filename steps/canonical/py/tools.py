@@ -74,6 +74,17 @@ tool_definitions = [
         },
     },
 #endstep
+#step >=11
+    {
+        "name": "agent",
+        "description": "Delegate a read-only investigation to a sub-agent. Give it a task; it explores on its own and reports back a summary.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"task": {"type": "string", "description": "The task for the sub-agent to investigate"}},
+            "required": ["task"],
+        },
+    },
+#endstep
 ]
 
 

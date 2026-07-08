@@ -117,5 +117,21 @@
       ],
       "finalStopReason": "end_turn"
     }
+  },
+  "11": {
+    "scenario": "delegate-to-subagent",
+    "expect": {
+      "toolCalls": [
+        "agent",
+        "read_file"
+      ],
+      "toolResultsContain": [
+        "hello from the subagent demo"
+      ],
+      "tracksUsed": [
+        "subagent"
+      ],
+      "finalStopReason": "end_turn"
+    }
   }
 }

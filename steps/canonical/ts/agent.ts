@@ -12,6 +12,9 @@ import { maybeCompact } from "./context.js";
 //#step >=8
 import { recallMemories } from "./memory.js";
 //#endstep
+//#step >=11
+import { runSubAgent } from "./subagent.js";
+//#endstep
 
 const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
 
@@ -97,6 +100,14 @@ export class Agent {
       const results: Anthropic.ToolResultBlockParam[] = [];
       for (const tu of toolUses) {
         console.log(`  → ${tu.name}(${JSON.stringify(tu.input)})`);
+//#step >=11
+        // The `agent` tool forks a read-only sub-agent with its own context.
+        if (tu.name === "agent") {
+          const summary = await runSubAgent(String((tu.input as any).task || ""), this.client, MODEL);
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: summary });
+          continue;
+        }
+//#endstep
 //#step >=10
         // Plan mode is read-only: writes and shell are denied on top of the gate.
         const blocked = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
