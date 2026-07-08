@@ -2,7 +2,7 @@
 
 ## Chapter Goals
 
-Verify that mini-claude's 19 core features all work correctly. All tests are manual execution + visual verification, all using `--yolo` mode (skip permission confirmations).
+With the whole tutorial built, the agent is complete. This chapter writes no new code — it runs the agent end to end through 19 manual scenarios to confirm every piece works: tools, memory, skills, sub-agents, editing, sessions. All manual execution and visual verification, in `--yolo` mode (skipping permission confirmations).
 
 ```mermaid
 graph LR
