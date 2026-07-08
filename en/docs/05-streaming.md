@@ -2,7 +2,9 @@
 
 ## Chapter Goals
 
-Implement streaming output so responses appear character by character, and support both Anthropic and OpenAI API backends.
+By now the agent can run a full turn, but there's a rough edge: the model thinks for a while, then dumps a whole answer at once, leaving you staring at nothing for those seconds. This chapter makes the output appear character by character — print each small chunk the moment the model generates it.
+
+Along the way the backend becomes two: besides Anthropic, it connects to any OpenAI-compatible endpoint, so switching models is just switching a base URL. The two backends stream over different protocols, which is exactly why they're worth covering together.
 
 ```mermaid
 graph LR
@@ -24,26 +26,6 @@ graph LR
     style Batch fill:#d4edda
     style ToolResult fill:#fff3cd
 ```
-
-## How Claude Code Does It
-
-### Why Streaming Output?
-
-Models generate at roughly 30-80 tokens per second, so longer responses take 10-30 seconds. Users can tolerate staring at a blank screen for about 2-3 seconds at most. Streaming output makes the first character appear within a few hundred milliseconds, turning "wait 30 seconds" into "watch content gradually being written" -- the perceived wait drops to near zero, and users can interrupt early if things go off track.
-
-Under the hood, it uses SSE (Server-Sent Events): the server pushes `data:` lines over a single persistent HTTP connection, sending a `content_block_delta` event every few tokens. Simpler than WebSocket, and one-way push is sufficient for LLM applications.
-
-### Streaming Processing and Parallel Tool Execution
-
-A key optimization in Claude Code: the `StreamingToolExecutor` starts executing fully-parsed tool_use blocks while the model is still generating subsequent content. In a serial approach, tool execution can only begin after the full API response arrives; with streaming parallelism, the first tool_use block is dispatched the moment it's fully parsed, without waiting for the second.
-
-Within a typical 5-30 second API stream window, file reads (< 100ms) can almost entirely fit in -- by the time the stream ends, tool results are often already ready.
-
-### Error Retry
-
-Not all errors are worth retrying: 429/503/529 and transient network failures (ECONNRESET) are retryable; 400/401/404 reflect code or configuration issues, so retrying is pointless.
-
-The rationale for exponential backoff (rather than fixed intervals): when a service is overloaded, many clients retrying simultaneously after a fixed 1-second delay creates a "retry storm" that makes the overload worse. Exponential backoff doubles the interval each round (1s -> 2s -> 4s), and adding random jitter breaks client synchronization -- this is standard distributed fault tolerance practice.
 
 ## Our Implementation
 
@@ -643,6 +625,28 @@ Comparison of parallel strategies between the two backends:
 - **Mixed sequences maintain safety**: `[read, read, write, read]` gets split into `[read||read]`, `[write]`, `[read]` -- three batches. Tools before and after write operations are independent and don't parallelize across write operations
 - **Typical speedup**: When the model reads 3-5 files in a single response, parallel execution usually brings a 2-3x speed improvement
 
+## What the Real Claude Code Does Beyond This
+
+Our streaming stopped at "print character by character." Claude Code's streaming pipeline does more on top: it starts running tools before the stream ends, meters tokens as they arrive, and reconnects automatically when the stream drops.
+
+### Why Streaming Output?
+
+Models generate at roughly 30-80 tokens per second, so longer responses take 10-30 seconds. Users can tolerate staring at a blank screen for about 2-3 seconds at most. Streaming output makes the first character appear within a few hundred milliseconds, turning "wait 30 seconds" into "watch content gradually being written" -- the perceived wait drops to near zero, and users can interrupt early if things go off track.
+
+Under the hood, it uses SSE (Server-Sent Events): the server pushes `data:` lines over a single persistent HTTP connection, sending a `content_block_delta` event every few tokens. Simpler than WebSocket, and one-way push is sufficient for LLM applications.
+
+### Streaming Processing and Parallel Tool Execution
+
+A key optimization in Claude Code: the `StreamingToolExecutor` starts executing fully-parsed tool_use blocks while the model is still generating subsequent content. In a serial approach, tool execution can only begin after the full API response arrives; with streaming parallelism, the first tool_use block is dispatched the moment it's fully parsed, without waiting for the second.
+
+Within a typical 5-30 second API stream window, file reads (< 100ms) can almost entirely fit in -- by the time the stream ends, tool results are often already ready.
+
+### Error Retry
+
+Not all errors are worth retrying: 429/503/529 and transient network failures (ECONNRESET) are retryable; 400/401/404 reflect code or configuration issues, so retrying is pointless.
+
+The rationale for exponential backoff (rather than fixed intervals): when a service is overloaded, many clients retrying simultaneously after a fixed 1-second delay creates a "retry storm" that makes the overload worse. Exponential backoff doubles the interval each round (1s -> 2s -> 4s), and adding random jitter breaks client synchronization -- this is standard distributed fault tolerance practice.
+
 ## Comparison
 
 | Dimension | Claude Code | mini-claude |
@@ -652,7 +656,6 @@ Comparison of parallel strategies between the two backends:
 | **Thinking handling** | Deep integration, independent display and folding | Basic support, filter thinking blocks |
 | **Streaming tool execution** | StreamingToolExecutor as standalone module, full event handling | Callback + earlyExecutions Map, streamlined implementation |
 | **Parallel tool execution** | Full concurrency scheduler | Anthropic streaming early execution + OpenAI batch Promise.all |
-
 ---
 
 > **Next chapter**: The Agent can now manipulate files and execute commands, but we need to prevent it from doing dangerous things -- the permission system protects your system.
