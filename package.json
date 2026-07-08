@@ -16,7 +16,9 @@
     "test": "npm run test:unit && npm run test:integration",
     "test:py": "python3 -B -m unittest discover -s python/tests -p \"test_*.py\"",
     "check": "npm run test && npm run test:py",
-    "check:full": "npm run check && npm run test:integration:py"
+    "check:full": "npm run check && npm run test:integration:py",
+    "steps:build": "node steps/build.mjs",
+    "step": "node steps/run.mjs"
   },
   "keywords": [
     "claude-code",
