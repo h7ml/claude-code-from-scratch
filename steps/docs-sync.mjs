@@ -57,8 +57,15 @@ function extractRegion(file, lang, step, region) {
   return out.map((l) => l.slice(indent)).join("\n").replace(/\s+$/, "");
 }
 
+function prevStepName(step) {
+  // the largest generated step below `step` (chapters 13/14 add no code, so ch15
+  // diffs against ch12, not a nonexistent 14).
+  for (let n = step - 1; n >= 1; n--) { const s = stepName(n); if (s) return s; }
+  return null;
+}
+
 function diffBlock(file, step, lang) {
-  const prev = stepName(step - 1), cur = stepName(step);
+  const prev = prevStepName(step), cur = stepName(step);
   if (!prev) throw new Error(`@diff needs a previous step (step ${step})`);
   const r = spawnSync("git", ["--no-pager", "diff", "--no-index", "--unified=2", "--",
     join(DIST, prev, lang, file), join(DIST, cur, lang, file)], { encoding: "utf-8" });

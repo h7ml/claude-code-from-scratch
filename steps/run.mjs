@@ -38,6 +38,7 @@ const STEP_INFO = {
   10: "plan mode — --plan makes the agent read-only; writes and shell are denied",
   11: "multi-agent — the agent tool forks a read-only sub-agent to investigate",
   12: "MCP — connect an external stdio JSON-RPC tool server and call its tools",
+  15: "autonomy — /goal keeps working until an evaluator judges the condition met; --auto gates writes with a classifier",
 };
 
 const args = process.argv.slice(2);

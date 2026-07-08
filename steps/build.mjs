@@ -32,6 +32,7 @@ const STEPS = [
   { n: 10, name: "10-plan-mode" },
   { n: 11, name: "11-multi-agent" },
   { n: 12, name: "12-mcp" },
+  { n: 15, name: "15-autonomy" },
 ];
 
 // Each file, and the first step at which it exists.
@@ -48,6 +49,7 @@ const FILES = {
     { file: "skills.ts", from: 9 },
     { file: "subagent.ts", from: 11 },
     { file: "mcp.ts", from: 12 },
+    { file: "autonomy.ts", from: 15 },
   ],
   py: [
     { file: "agent.py", from: 1 },
@@ -61,6 +63,7 @@ const FILES = {
     { file: "skills.py", from: 9 },
     { file: "subagent.py", from: 11 },
     { file: "mcp_client.py", from: 12 },
+    { file: "autonomy.py", from: 15 },
   ],
 };
 

@@ -31,6 +31,17 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   // --plan: read-only mode. The agent may read and think, but not write or run shell.
   if (argv.includes("--plan")) { agent.setMode("plan"); argv = argv.filter((a) => a !== "--plan"); console.log("(plan mode: read-only)"); }
 //#endstep
+//#step >=15
+  // --auto: a classifier gates each write instead of asking; --goal pursues a condition.
+  if (argv.includes("--auto")) { agent.setMode("auto"); argv = argv.filter((a) => a !== "--auto"); console.log("(auto mode: a classifier gates each write)"); }
+  const goalIdx = argv.indexOf("--goal");
+  if (goalIdx >= 0) {
+    const condition = argv[goalIdx + 1] || "";
+    await agent.pursueGoal(condition, argv.slice(goalIdx + 2).join(" "));
+    saveSession(agent.history());
+    return;
+  }
+//#endstep
 
   const oneShot = argv.join(" ").trim();
   if (oneShot) {

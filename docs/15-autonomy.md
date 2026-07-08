@@ -12,6 +12,112 @@
 
 三者的分工可以先记一句话：`/goal` 决定**要不要**继续，`/loop` 决定**什么时候**开始下一次，Auto Mode 决定**能不能**放行某个动作。代码集中在新增的 `src/autonomy.ts` 和 `python/mini_claude/autonomy.py`（提示词与纯逻辑），接线在 `agent` 和 CLI 里。
 
+> ▶ **跑这一章**：`node steps/run.mjs 15`（无需 API key）——看 `/goal` 把一个条件追到达成。加 `--diff` 看它比第 12 章多了什么。
+
+教学轨（`steps/`）把其中两件做成了能跑的最小实现：`/goal`（评估器回灌）和 `--auto`（分类器代替确认框）；`/loop` 只在下文讲、不在最小实现里。相对第 12 章，新增了一个 `autonomy.ts`，agent 多了个 `pursueGoal` 和一段 auto-mode 拦截：
+
+<!-- @diff file=agent.ts step=15 lang=ts -->
+```diff
+@@ -7,4 +7,5 @@ import { recallMemories } from "./memory.js";
+ import { runSubAgent } from "./subagent.js";
+ import { connectMcp, type McpConnection } from "./mcp.js";
++import { evaluateGoal, classifyAction } from "./autonomy.js";
+ 
+ const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
+@@ -84,4 +85,12 @@ export class Agent {
+           continue;
+         }
++        // Auto mode: a classifier decides block/allow instead of asking a human.
++        if (this.mode === "auto" && (tu.name === "write_file" || tu.name === "edit_file" || tu.name === "run_shell")) {
++          const verdict = await classifyAction(tu.name, tu.input, this.transcriptText(), this.client, MODEL);
++          if (!verdict.allow) {
++            results.push({ type: "tool_result", tool_use_id: tu.id, content: `Blocked by auto-mode monitor: ${verdict.reason}` });
++            continue;
++          }
++        }
+         // Plan mode is read-only: writes and shell are denied on top of the gate.
+         const blocked = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
+@@ -107,3 +116,17 @@ export class Agent {
+     this.mcp = await connectMcp("node", [process.env.MINI_MCP_SERVER]);
+   }
++  private transcriptText(): string {
++    return this.messages.map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[tool call / result]"}`).join("\n");
++  }
++  // Autonomy: keep working until an independent evaluator judges the condition met.
++  async pursueGoal(condition: string, prompt: string): Promise<void> {
++    await this.chat(prompt);
++    for (let i = 0; i < 5; i++) {
++      const verdict = await evaluateGoal(condition, this.transcriptText(), this.client, MODEL);
++      if (verdict.met) { console.log(`✓ goal met: ${condition}`); return; }
++      console.log(`  (goal not met — ${verdict.reason}; continuing)`);
++      await this.chat(`The goal "${condition}" is not met yet: ${verdict.reason}. Keep working toward it.`);
++    }
++    console.log(`  (gave up after 5 iterations without meeting: ${condition})`);
++  }
+ }
+```
+<!-- @enddiff -->
+
+评估器就是一次独立的旁路调用，判「达成，或没达成 + 原因」——原因会被回灌进下一个 turn：
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=autonomy.ts region=goal step=15 -->
+```typescript
+// An independent evaluator judges whether the condition is met. Returns MET, or
+// NOT_MET with a reason that gets reinjected into the next turn.
+export async function evaluateGoal(
+  condition: string, transcript: string, client: Anthropic, model: string,
+): Promise<{ met: boolean; reason: string }> {
+  const reply = await client.messages.create({
+    model, max_tokens: 256,
+    system: "You are a goal evaluator. Given a condition and a transcript, reply exactly 'MET' if the condition is satisfied, otherwise 'NOT_MET: <short reason>'.",
+    messages: [{ role: "user", content: `Condition: ${condition}\n\nTranscript so far:\n${transcript}` }],
+  });
+  const text = reply.content.filter((b) => b.type === "text").map((b: any) => b.text).join("").trim();
+  if (text.startsWith("MET")) return { met: true, reason: "" };
+  return { met: false, reason: text.replace(/^NOT_MET:?\s*/, "") };
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=autonomy.py region=goal step=15 -->
+```python
+def evaluate_goal(condition, transcript, client, model):
+    reply = client.messages.create(
+        model=model, max_tokens=256,
+        system="You are a goal evaluator. Given a condition and a transcript, reply exactly 'MET' if the condition is satisfied, otherwise 'NOT_MET: <short reason>'.",
+        messages=[{"role": "user", "content": f"Condition: {condition}\n\nTranscript so far:\n{transcript}"}],
+    )
+    text = "".join(b.text for b in reply.content if b.type == "text").strip()
+    if text.startswith("MET"):
+        return {"met": True, "reason": ""}
+    return {"met": False, "reason": text.replace("NOT_MET:", "").replace("NOT_MET", "").strip()}
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+跑一下，条件是「done.txt 存在」：评估器先判没达成、把原因回灌，agent 于是写文件，再判就达成了：
+
+<!-- @transcript step=15 lang=ts -->
+```
+$ node steps/run.mjs 15
+▶ step 15 demo (no API key — local mock model)   sandbox: <sandbox>
+  $ mini-claude --goal done.txt exists Create done.txt with ok.
+
+Working on it.
+  (goal not met — done.txt has not been created yet.; continuing)
+
+  → write_file({"file_path":"done.txt","content":"ok"})
+Created done.txt.
+✓ goal met: done.txt exists
+
+  ✓ verified: done.txt contains "ok"
+```
+<!-- @endtranscript -->
+
+下面三节是更完整的讨论——真实 Claude Code 怎么做、我们的取舍、以及 `/loop` 和 Auto Mode 的分类器细节。
+
 ## §1 `/goal` — 用评估器把一个条件追到底
 
 ### Claude Code 怎么做的

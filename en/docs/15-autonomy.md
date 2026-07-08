@@ -12,6 +12,112 @@ Earlier chapters let the agent finish a job within one turn. This chapter is abo
 
 One sentence captures the division of labor: `/goal` decides **whether** to continue, `/loop` decides **when** the next run starts, and Auto Mode decides **whether** a given action is allowed. The code lives in the new `src/autonomy.ts` and `python/mini_claude/autonomy.py` (prompts and pure logic), wired into `agent` and the CLI.
 
+> ▶ **Run this chapter**: `node steps/run.mjs 15` (no API key) — watch `/goal` chase a condition until it is met. Add `--diff` to see what it added over chapter 12.
+
+The teaching track (`steps/`) implements two of these as runnable minimal versions: `/goal` (the evaluator reinjection loop) and `--auto` (a classifier replacing the confirmation dialog); `/loop` is only discussed below, not in the minimal implementation. Relative to chapter 12, it adds an `autonomy.ts`, and the agent gains a `pursueGoal` plus an auto-mode intercept:
+
+<!-- @diff file=agent.ts step=15 lang=ts -->
+```diff
+@@ -7,4 +7,5 @@ import { recallMemories } from "./memory.js";
+ import { runSubAgent } from "./subagent.js";
+ import { connectMcp, type McpConnection } from "./mcp.js";
++import { evaluateGoal, classifyAction } from "./autonomy.js";
+ 
+ const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
+@@ -84,4 +85,12 @@ export class Agent {
+           continue;
+         }
++        // Auto mode: a classifier decides block/allow instead of asking a human.
++        if (this.mode === "auto" && (tu.name === "write_file" || tu.name === "edit_file" || tu.name === "run_shell")) {
++          const verdict = await classifyAction(tu.name, tu.input, this.transcriptText(), this.client, MODEL);
++          if (!verdict.allow) {
++            results.push({ type: "tool_result", tool_use_id: tu.id, content: `Blocked by auto-mode monitor: ${verdict.reason}` });
++            continue;
++          }
++        }
+         // Plan mode is read-only: writes and shell are denied on top of the gate.
+         const blocked = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
+@@ -107,3 +116,17 @@ export class Agent {
+     this.mcp = await connectMcp("node", [process.env.MINI_MCP_SERVER]);
+   }
++  private transcriptText(): string {
++    return this.messages.map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[tool call / result]"}`).join("\n");
++  }
++  // Autonomy: keep working until an independent evaluator judges the condition met.
++  async pursueGoal(condition: string, prompt: string): Promise<void> {
++    await this.chat(prompt);
++    for (let i = 0; i < 5; i++) {
++      const verdict = await evaluateGoal(condition, this.transcriptText(), this.client, MODEL);
++      if (verdict.met) { console.log(`✓ goal met: ${condition}`); return; }
++      console.log(`  (goal not met — ${verdict.reason}; continuing)`);
++      await this.chat(`The goal "${condition}" is not met yet: ${verdict.reason}. Keep working toward it.`);
++    }
++    console.log(`  (gave up after 5 iterations without meeting: ${condition})`);
++  }
+ }
+```
+<!-- @enddiff -->
+
+The evaluator is just one independent side call that judges "met, or not-met + reason" — the reason gets reinjected into the next turn:
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=autonomy.ts region=goal step=15 -->
+```typescript
+// An independent evaluator judges whether the condition is met. Returns MET, or
+// NOT_MET with a reason that gets reinjected into the next turn.
+export async function evaluateGoal(
+  condition: string, transcript: string, client: Anthropic, model: string,
+): Promise<{ met: boolean; reason: string }> {
+  const reply = await client.messages.create({
+    model, max_tokens: 256,
+    system: "You are a goal evaluator. Given a condition and a transcript, reply exactly 'MET' if the condition is satisfied, otherwise 'NOT_MET: <short reason>'.",
+    messages: [{ role: "user", content: `Condition: ${condition}\n\nTranscript so far:\n${transcript}` }],
+  });
+  const text = reply.content.filter((b) => b.type === "text").map((b: any) => b.text).join("").trim();
+  if (text.startsWith("MET")) return { met: true, reason: "" };
+  return { met: false, reason: text.replace(/^NOT_MET:?\s*/, "") };
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=autonomy.py region=goal step=15 -->
+```python
+def evaluate_goal(condition, transcript, client, model):
+    reply = client.messages.create(
+        model=model, max_tokens=256,
+        system="You are a goal evaluator. Given a condition and a transcript, reply exactly 'MET' if the condition is satisfied, otherwise 'NOT_MET: <short reason>'.",
+        messages=[{"role": "user", "content": f"Condition: {condition}\n\nTranscript so far:\n{transcript}"}],
+    )
+    text = "".join(b.text for b in reply.content if b.type == "text").strip()
+    if text.startswith("MET"):
+        return {"met": True, "reason": ""}
+    return {"met": False, "reason": text.replace("NOT_MET:", "").replace("NOT_MET", "").strip()}
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+Run it: the condition is "done.txt exists" — the evaluator first judges not-met and reinjects the reason, so the agent writes the file, and the next judgement is met:
+
+<!-- @transcript step=15 lang=ts -->
+```
+$ node steps/run.mjs 15
+▶ step 15 demo (no API key — local mock model)   sandbox: <sandbox>
+  $ mini-claude --goal done.txt exists Create done.txt with ok.
+
+Working on it.
+  (goal not met — done.txt has not been created yet.; continuing)
+
+  → write_file({"file_path":"done.txt","content":"ok"})
+Created done.txt.
+✓ goal met: done.txt exists
+
+  ✓ verified: done.txt contains "ok"
+```
+<!-- @endtranscript -->
+
+The three sections below are the fuller discussion — how real Claude Code does it, our trade-offs, and the `/loop` and Auto Mode classifier details.
+
 ## §1 `/goal` — chase a condition to the end with an evaluator
 
 ### How Claude Code does it

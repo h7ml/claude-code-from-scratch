@@ -18,6 +18,9 @@ import { runSubAgent } from "./subagent.js";
 //#step >=12
 import { connectMcp, type McpConnection } from "./mcp.js";
 //#endstep
+//#step >=15
+import { evaluateGoal, classifyAction } from "./autonomy.js";
+//#endstep
 
 const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
 
@@ -132,6 +135,16 @@ export class Agent {
           continue;
         }
 //#endstep
+//#step >=15
+        // Auto mode: a classifier decides block/allow instead of asking a human.
+        if (this.mode === "auto" && (tu.name === "write_file" || tu.name === "edit_file" || tu.name === "run_shell")) {
+          const verdict = await classifyAction(tu.name, tu.input, this.transcriptText(), this.client, MODEL);
+          if (!verdict.allow) {
+            results.push({ type: "tool_result", tool_use_id: tu.id, content: `Blocked by auto-mode monitor: ${verdict.reason}` });
+            continue;
+          }
+        }
+//#endstep
 //#step >=10
         // Plan mode is read-only: writes and shell are denied on top of the gate.
         const blocked = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
@@ -168,6 +181,22 @@ export class Agent {
   private async ensureMcp(): Promise<void> {
     if (this.mcp || !process.env.MINI_MCP_SERVER) return;
     this.mcp = await connectMcp("node", [process.env.MINI_MCP_SERVER]);
+  }
+//#endstep
+//#step >=15
+  private transcriptText(): string {
+    return this.messages.map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[tool call / result]"}`).join("\n");
+  }
+  // Autonomy: keep working until an independent evaluator judges the condition met.
+  async pursueGoal(condition: string, prompt: string): Promise<void> {
+    await this.chat(prompt);
+    for (let i = 0; i < 5; i++) {
+      const verdict = await evaluateGoal(condition, this.transcriptText(), this.client, MODEL);
+      if (verdict.met) { console.log(`✓ goal met: ${condition}`); return; }
+      console.log(`  (goal not met — ${verdict.reason}; continuing)`);
+      await this.chat(`The goal "${condition}" is not met yet: ${verdict.reason}. Keep working toward it.`);
+    }
+    console.log(`  (gave up after 5 iterations without meeting: ${condition})`);
   }
 //#endstep
 }

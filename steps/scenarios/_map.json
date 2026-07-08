@@ -145,5 +145,20 @@
       ],
       "finalStopReason": "end_turn"
     }
+  },
+  "15": {
+    "scenario": "pursue-goal",
+    "expect": {
+      "toolCalls": [
+        "write_file"
+      ],
+      "files": {
+        "done.txt": "ok"
+      },
+      "tracksUsed": [
+        "goal"
+      ],
+      "finalStopReason": "end_turn"
+    }
   }
 }

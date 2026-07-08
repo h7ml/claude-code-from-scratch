@@ -38,6 +38,19 @@ def main(argv=None) -> None:
         argv = [a for a in argv if a != "--plan"]
         print("(plan mode: read-only)")
 #endstep
+#step >=15
+    # --auto: a classifier gates each write instead of asking; --goal pursues a condition.
+    if "--auto" in argv:
+        agent.set_mode("auto")
+        argv = [a for a in argv if a != "--auto"]
+        print("(auto mode: a classifier gates each write)")
+    if "--goal" in argv:
+        gi = argv.index("--goal")
+        condition = argv[gi + 1] if gi + 1 < len(argv) else ""
+        agent.pursue_goal(condition, " ".join(argv[gi + 2:]))
+        save_session(agent.history())
+        return
+#endstep
 
     one_shot = " ".join(argv).strip()
     if one_shot:
