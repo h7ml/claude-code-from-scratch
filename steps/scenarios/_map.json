@@ -1,5 +1,10 @@
 {
-  "1": "read-a-file",
-  "2": "write-a-file",
-  "3": "read-a-file"
+  "1": { "scenario": "read-a-file", "expect": {
+    "toolCalls": ["read_file"], "toolResultsContain": ["hello from step one"], "finalStopReason": "end_turn" } },
+  "2": { "scenario": "write-a-file", "expect": {
+    "toolCalls": ["write_file"], "toolResultsContain": ["Successfully wrote to notes.txt"],
+    "files": { "notes.txt": "remember-this" }, "finalStopReason": "end_turn" } },
+  "3": { "scenario": "read-a-file", "expect": {
+    "toolCalls": ["read_file"], "toolResultsContain": ["hello from step one"],
+    "systemContains": "Do not propose changes to code you haven't read", "finalStopReason": "end_turn" } }
 }

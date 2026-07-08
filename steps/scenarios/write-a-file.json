@@ -4,6 +4,5 @@
   "turns": [
     { "text": "I'll create the file.", "tools": [{ "name": "write_file", "input": { "file_path": "notes.txt", "content": "remember-this" } }] },
     { "text": "Created notes.txt." }
-  ],
-  "assert": { "files": { "notes.txt": "remember-this" } }
+  ]
 }

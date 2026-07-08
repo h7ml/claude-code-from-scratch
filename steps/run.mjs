@@ -49,14 +49,21 @@ const n = Number(stepArg);
 const name = nameOf(n);
 if (!name) { console.error(`Step ${n} not found. Have: ${stepDirs.join(", ")}`); process.exit(1); }
 
-// --- --diff: what this chapter changed vs the previous one ---
+// --- --diff: what this chapter changed vs the previous one (source only) ---
 if (flag("--diff")) {
   const prev = nameOf(n - 1);
   if (!prev) { console.log(`Step ${n} is the first step — nothing to diff.`); process.exit(0); }
   const lang = usePy ? "py" : "ts";
-  const r = spawnSync("git", ["--no-pager", "diff", "--no-index", "--",
-    join(DIST, prev, lang), join(DIST, name, lang)], { stdio: "inherit" });
-  process.exit(r.status === 1 ? 0 : (r.status ?? 0)); // git diff exits 1 when there are differences
+  const ext = usePy ? ".py" : ".ts";
+  const srcFiles = new Set([...listSrc(join(DIST, prev, lang), ext), ...listSrc(join(DIST, name, lang), ext)]);
+  for (const f of [...srcFiles].sort()) {
+    spawnSync("git", ["--no-pager", "diff", "--no-index", "--",
+      join(DIST, prev, lang, f), join(DIST, name, lang, f)], { stdio: "inherit" });
+  }
+  process.exit(0);
+}
+function listSrc(dir, ext) {
+  try { return readdirSync(dir).filter((f) => f.endsWith(ext)); } catch { return []; }
 }
 
 // --- --live: the real model via .env ---
@@ -81,17 +88,31 @@ if (flag("--live")) {
 
 // --- default: no-key demo against the local mock ---
 const map = JSON.parse(readFileSync(join(SCEN, "_map.json"), "utf-8"));
-const scenario = JSON.parse(readFileSync(join(SCEN, map[String(n)] + ".json"), "utf-8"));
+const conf = map[String(n)];
+const scenarioPath = join(SCEN, conf.scenario + ".json");
+const scenario = JSON.parse(readFileSync(scenarioPath, "utf-8"));
+const expect = conf.expect || {};
+if (promptArgs.length) console.log("(the demo replays a scripted scenario; use --live for your own prompt)\n");
 const workdir = mkdtempSync(join(tmpdir(), `stepdemo-${n}-`));
 for (const [f, c] of Object.entries(scenario.setup?.files || {})) { const p = join(workdir, f); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, c); }
 
-console.log(`▶ step ${n} demo (no API key — local mock model)`);
+console.log(`▶ step ${n} demo (no API key — local mock model)   sandbox: ${workdir}`);
 console.log(`  you: ${scenario.prompt}\n`);
 
+// After the run, show a real check of the side effect so it isn't just talk.
+function verify() {
+  for (const [f, content] of Object.entries(expect.files || {})) {
+    const p = join(workdir, f);
+    const ok = existsSync(p) && readFileSync(p, "utf-8") === content;
+    console.log(`\n  ✓ verified: ${f} ${ok ? `contains "${content}"` : "MISSING/incorrect"}`);
+  }
+}
+
 if (usePy) {
-  const env = { ...process.env, MOCK_DEMO: "1" };
-  for (const k of ["http_proxy", "https_proxy", "all_proxy"]) delete env[k];
-  const r = spawnSync(join(REPO, ".venv", "bin", "python"), [join(HERE, "_pydriver.py"), join(DIST, name, "py"), join(SCEN, map[String(n)] + ".json"), join(workdir, "_events.jsonl"), workdir], { stdio: "inherit", env });
+  const env = { ...process.env };
+  for (const k of ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete env[k];
+  const r = spawnSync(join(REPO, ".venv", "bin", "python"), [join(HERE, "_pydriver.py"), join(DIST, name, "py"), scenarioPath, join(workdir, "_events.jsonl"), workdir], { stdio: "inherit", env });
+  verify();
   process.exit(r.status ?? 0);
 }
 
@@ -106,4 +127,5 @@ process.chdir(workdir);
 const mod = await import(pathToFileURL(join(tsDir, "agent.js")).href);
 await new mod.Agent().chat(scenario.prompt);
 await mock.close();
+verify();
 process.exit(0);

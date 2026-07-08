@@ -75,13 +75,19 @@ def start_mock(scenario, log_path=None):
             sys_text = body.get("system", "")
             if isinstance(sys_text, list):
                 sys_text = "".join(b.get("text", "") for b in sys_text)
+            # tool_result blocks the agent sent back — proof the tool actually
+            # ran, with its real output.
+            tool_results = []
+            for m in body.get("messages", []):
+                if isinstance(m.get("content"), list):
+                    for b in m["content"]:
+                        if b.get("type") == "tool_result":
+                            c = b.get("content")
+                            tool_results.append({"tool_use_id": b.get("tool_use_id"),
+                                                 "content": c if isinstance(c, str) else json.dumps(c)})
             log({"type": "request", "req": req_index, "turnIndex": assistant_count,
                  "system": sys_text, "tools": [t["name"] for t in body.get("tools", [])],
-                 "messages": [{"role": m["role"], "content": (m["content"] if isinstance(m["content"], str)
-                              else [(f"tool_use:{b['name']}" if b.get("type") == "tool_use"
-                                     else "tool_result" if b.get("type") == "tool_result" else b.get("type"))
-                                    for b in m["content"]])} for m in body.get("messages", [])],
-                 "stream": bool(body.get("stream"))})
+                 "toolResults": tool_results, "stream": bool(body.get("stream"))})
 
             if turn is None:
                 log({"type": "exhausted", "req": req_index, "turnIndex": assistant_count})

@@ -21,7 +21,9 @@
     "step": "node steps/run.mjs",
     "steps:test": "node steps/test.mjs",
     "steps:lint": "node steps/lint-markers.mjs",
-    "steps:selftest": "node steps/mock-anthropic.selftest.mjs"
+    "steps:selftest": "node steps/mock-anthropic.selftest.mjs",
+    "steps:selfcheck": "node steps/test.selfcheck.mjs",
+    "steps:selftest:py": ".venv/bin/python steps/mock_anthropic.selftest.py"
   },
   "keywords": [
     "claude-code",

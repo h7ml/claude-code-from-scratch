@@ -63,21 +63,27 @@ churn. Seams are added at the chapter that first needs them (not upfront):
 
 | Seam | First chapter | What plugs in later |
 |------|---------------|---------------------|
-| `callModel(req)` | 1 | ch5 swaps `messages.create` → `messages.stream` |
+| `callModel(req)` | 1 (inline) | ch5 turns it into the streaming call; it is the single model-call site |
 | `toolRegistry` | 2 | ch9 skill / ch11 agent / ch12 mcp add tools |
 | `executeToolCall(name,input)` | 2 | ch6 wraps it with `permissionGate` |
 | `buildRequest()` (system+tools+messages) | 3 | ch3 system prompt; ch8 memory injection |
-| `slashCommand(input)` | 4 | ch7 `/compact`, ch9 `/skill`, ch10 `/plan`, ch15 `/goal` `/loop` |
+| `history` / message array | 1 | ch7 compaction rewrites it; ch4 save/resume serializes it |
+| `runCli(argv)` / `slashCommand(input)` | 4 | ch7 `/compact`, ch9 `/skill`, ch10 `/plan`, ch15 `/goal` `/loop` |
 | `sessionStore` | 4 | save/resume |
 | `permissionGate(call)` | 6 | ch10 plan-mode read-only, ch15 auto classifier |
 | `beforeTurn()` / `afterAssistant()` | 7 | ch7 compaction at turn boundary; ch8 memory prefetch |
-| `sideQuery(system,messages)` | 15 | one-shot sub-call: goal evaluator, auto classifier |
+| `auxModelCall(kind, system, messages)` | 7 | one-shot side calls: ch7 compact summary, ch15 goal evaluator, ch15 auto classifier (distinct from the main loop's `callModel`) |
+| `eventSink` / trace | 3 | `--trace-request` (ch3 system), `--trace-stream` (ch5 chunks); the observable substrate for demos/tests |
+| `clock` / scheduler | 15 | ch15 `/loop` — injectable so CI never really sleeps 60s |
 
-Codex Gate 0 correction: the earlier claim "loop only changes at ch5/ch6" was
-wrong — context (turn-boundary tool_use/tool_result pairing), memory (inject
-around the model call), tool routing (mcp/subagent/skill), and plan mode all
-touch the core. Naming the seams up front is how we keep those changes small and
-predictable instead of ad-hoc rewrites.
+Gate 0/1 correction: "loop only changes at ch5/ch6" was wrong. Context
+(turn-boundary tool_use/tool_result pairing), memory (inject around the model
+call), tool routing (mcp/subagent/skill), plan mode, and the aux one-shot calls
+(compact/goal/classifier) all touch the core. `callModel` is inline in ch1 and
+becomes the streaming call in ch5 — it is NOT abstracted early (no empty hooks);
+each seam is introduced at the chapter that first needs it. `auxModelCall` is a
+*separate* model-call site from `callModel` so the mock can tell a compaction /
+evaluator / classifier request apart from a main-loop request (see scenarios).
 
 ## 4. Chapter → step map
 
@@ -124,11 +130,24 @@ Decisions locked by Gate 0:
 
 ## 6. Scenarios + mock + event log
 
-- **`steps/scenarios/*.json`** is the single source of scripted model behavior. A
-  scenario is an ordered list of assistant turns keyed by which step it targets;
-  each turn is either `{text}` or `{tool_use:[{name,input}], then...}`. `test.mjs`,
-  `run --demo`, and `@transcript` all read the same scenario — no third copy to
-  drift. (Gate 0 P2.)
+- **`steps/scenarios/*.json`** is the single source of scripted model behavior.
+  A turn is `{tools:[{name,input}], text?}` (tool_use) or `{text}` (final).
+  `steps/scenarios/_map.json` maps each step to its scenario **and** its
+  expectations (what the chapter must prove: `toolCalls`, `toolResultsContain`,
+  `systemContains`, `files`, `finalStopReason`). `test.mjs`, `run --demo`, and
+  `@transcript` read the same scenario — no third copy to drift. (Gate 0 P2.)
+  - *Single-loop vs multi-track (Gate 1 P0):* ch1-6 have one model-call loop, so
+    a flat `turns` list keyed by assistant-message count is enough. From **ch7**
+    the agent makes *aux* one-shot calls (compact summary; ch11 sub-agents; ch15
+    goal evaluator / auto classifier) that are NOT the main loop — a sub-agent's
+    first request also has assistantCount 0. So at ch7 the scenario gains
+    `tracks: { main: [...], "compact": [...], "subagent:explore": [...], "auto:stage1": [...], "goal": [...] }`
+    and the mock **routes each request to a track by its shape** (system prompt /
+    tools / first user message), logging the `track`; tests assert every track is
+    consumed. `turns` stays as sugar for `{ main: turns }`. This is implemented
+    when ch7 lands (not stubbed early); Gate 3 re-checks it. MCP (ch12) is a
+    stdio subprocess with its own mock server + JSONL log, separate from the
+    model mock.
 - **Mock is in-process, per language.** `mock-anthropic.mjs` (Node) and
   `mock_anthropic.py` (Python) both implement the real Anthropic `POST
   /v1/messages` — `create` and SSE `stream`, `tool_use` blocks, `usage`, errors —
@@ -148,22 +167,35 @@ Decisions locked by Gate 0:
   false green). It emits an **event log** (JSONL): every request (system, tools,
   messages), every tool_use it issued, and usage — the machine-observable
   substrate for assertions and transcripts.
-- **`mock-anthropic.selftest.mjs`** (built first): the real TS SDK and the real
-  Python SDK each hit the mock for create / stream / tool_use / usage / error and
-  must succeed. This proves protocol fidelity before any step depends on it.
+- **Conformance selftests** prove protocol fidelity before any step depends on
+  it: `mock-anthropic.selftest.mjs` drives the **Node** mock with the real TS SDK
+  (create, stream, tool_use); `mock_anthropic.selftest.py` drives the **Python**
+  mock with the real Python SDK (create, stream text chunks, stream tool input,
+  usage, exhaustion→error). Each is same-process (the only loopback shape that
+  works on the dev host). `test.mjs` then exercises both mocks end-to-end.
 
 ## 7. test.mjs
 
-For each step × {ts, py}:
-1. compile (tsc) / import (py) — must pass, **no skips** (Gate 0: the existing
-   parity-skip logic is not reused; a missing Python env fails CI, it does not
-   pass vacuously).
-2. run the step's scenario against the mock; assert the **normalized event log**:
-   requests issued, tool calls + inputs, side-effect files, exit code. Natural-
-   language output is only matched by `contains`/regex.
-3. **parity**: TS and Python produce the same normalized event log for the same
-   scenario.
-Deterministic, no API key → runs in CI.
+For each step × {ts, py}, run the scenario against the in-process mock and assert
+**behaviorally** (Gate 1 — the earlier "did the mock emit a tool name" check was
+false-green and is gone):
+1. compile (tsc) / import (py) — must pass, **no skips** (a missing Python env
+   fails, it does not pass vacuously).
+2. **every scripted turn consumed** (one model call per turn) and the **final
+   turn reached** (`stop_reason == end_turn`) — catches an agent that stops
+   feeding tool results back.
+3. **each tool really ran**: its real output appears in the `tool_result` the
+   agent sent back (`toolResultsContain`) — catches a broken/stubbed tool.
+4. **the system prompt carries what the chapter added** (`systemContains`) —
+   catches a broken prompt.
+5. **file side effects** happened; natural language only via `contains`.
+6. **parity**: TS and Python produce the same normalized event log (requests,
+   tool_result contents, responses).
+
+`test.selfcheck.mjs` is the meta-test: it applies three mutations (garbage
+`read_file`, agent never feeds results back, broken system prompt) to canonical,
+regenerates, and asserts `test.mjs` goes **red** for each — so the harness is
+proven to catch broken code, not just pass. Deterministic, no API key → CI.
 
 ## 8. docs-sync.mjs
 

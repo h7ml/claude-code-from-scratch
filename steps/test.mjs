@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // Verify every step in both languages against the in-process mock — no API key.
-// For each step × {ts, py}: run the scenario, then assert the mock event log
-// (tool calls), the file side effects, no scenario exhaustion, and TS/Python
-// parity on a normalized event log.
+// Assertions are behavioral (Gate 1): every scripted turn is consumed, the final
+// turn is reached, each tool actually ran (its real output shows up in the
+// tool_result the agent sent back), the system prompt contains what the chapter
+// added, file side effects happened, and TS/Python stay at parity. checkStep is
+// exported so test.selfcheck.mjs can prove the harness catches broken code.
 
 import { startMock } from "./mock-anthropic.mjs";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from "fs";
@@ -18,15 +20,12 @@ const SCEN = join(HERE, "scenarios");
 const TSC = join(REPO, "node_modules", ".bin", "tsc");
 const VENV_PY = join(REPO, ".venv", "bin", "python");
 
-if (!existsSync(DIST)) spawnSync("node", [join(HERE, "build.mjs")], { stdio: "inherit" });
-const map = JSON.parse(readFileSync(join(SCEN, "_map.json"), "utf-8"));
-const stepDirs = readdirSync(DIST).sort();
-const stepName = (n) => stepDirs.find((s) => s.startsWith(String(n).padStart(2, "0") + "-"));
-
+function ensureBuilt() { if (!existsSync(DIST)) spawnSync("node", [join(HERE, "build.mjs")], { stdio: "inherit" }); }
+const stepDirs = () => readdirSync(DIST).sort();
+const stepName = (n) => stepDirs().find((s) => s.startsWith(String(n).padStart(2, "0") + "-"));
+const readLog = (p) => existsSync(p) ? readFileSync(p, "utf-8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
 let scratchN = 0;
 const scratch = () => { const d = join(tmpdir(), `steptest-${process.pid}-${scratchN++}`); rmSync(d, { recursive: true, force: true }); mkdirSync(d, { recursive: true }); return d; };
-const readLog = (p) => existsSync(p) ? readFileSync(p, "utf-8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
-
 function setupFiles(scenario, workdir) {
   for (const [name, content] of Object.entries(scenario.setup?.files || {})) {
     const p = join(workdir, name); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, content);
@@ -41,9 +40,10 @@ async function runTs(n, scenario, logPath, workdir) {
   setupFiles(scenario, workdir);
   const mock = await startMock({ scenario, logPath });
   const prev = { cwd: process.cwd(), base: process.env.ANTHROPIC_BASE_URL, key: process.env.ANTHROPIC_API_KEY, write: process.stdout.write };
+  let out = "";
   process.env.ANTHROPIC_BASE_URL = mock.url; process.env.ANTHROPIC_API_KEY = "test";
   process.chdir(workdir);
-  process.stdout.write = () => true; // silence the agent during tests
+  process.stdout.write = (s) => { out += s; return true; }; // capture, don't discard
   try {
     const mod = await import(pathToFileURL(join(tsDir, "agent.js")).href + `?t=${Date.now()}`);
     await new mod.Agent().chat(scenario.prompt);
@@ -52,60 +52,92 @@ async function runTs(n, scenario, logPath, workdir) {
     process.env.ANTHROPIC_BASE_URL = prev.base; process.env.ANTHROPIC_API_KEY = prev.key;
     await mock.close();
   }
+  return out;
 }
 
 function runPy(n, scenarioPath, logPath, workdir) {
   const pyDir = join(DIST, stepName(n), "py");
   const env = { ...process.env };
-  delete env.http_proxy; delete env.https_proxy; delete env.all_proxy;
+  for (const k of ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete env[k];
   const r = spawnSync(VENV_PY, [join(HERE, "_pydriver.py"), pyDir, scenarioPath, logPath, workdir],
     { encoding: "utf-8", env, timeout: 30000 });
   if (r.status !== 0) throw new Error(`python driver failed for step ${n}:\n${(r.stderr || "").split("\n").slice(-6).join("\n")}`);
+  return r.stdout || "";
 }
 
-// Normalize an event log to what must match across languages.
+// What must match across languages.
 function normalize(log) {
   return JSON.stringify({
-    requests: log.filter((e) => e.type === "request").map((e) => ({ tools: e.tools })),
+    requests: log.filter((e) => e.type === "request").map((e) => ({ tools: e.tools, toolResults: (e.toolResults || []).map((t) => t.content) })),
     responses: log.filter((e) => e.type === "response").map((e) => ({ stop_reason: e.stop_reason, tool_use: e.tool_use })),
     exhausted: log.some((e) => e.type === "exhausted"),
   });
 }
 
-const fails = [];
-function assert(name, cond, detail = "") { console.log(`${cond ? "ok  " : "FAIL"} ${name}${cond ? "" : "  " + detail}`); if (!cond) fails.push(name); }
-
-const steps = Object.keys(map).map(Number).sort((a, b) => a - b);
-for (const n of steps) {
-  const scenarioPath = join(SCEN, map[String(n)] + ".json");
+// Run one step in both languages; return an array of failure strings (empty = pass).
+export async function checkStep(n) {
+  ensureBuilt();
+  const map = JSON.parse(readFileSync(join(SCEN, "_map.json"), "utf-8"));
+  const conf = map[String(n)];
+  const scenarioPath = join(SCEN, conf.scenario + ".json");
   const scenario = JSON.parse(readFileSync(scenarioPath, "utf-8"));
+  const expect = conf.expect || {};
+  const fails = [];
   const norms = {};
+  const tag = (lang, msg) => fails.push(`step${n} ${lang}: ${msg}`);
+
   for (const lang of ["ts", "py"]) {
     const workdir = scratch();
     const logPath = join(workdir, "_events.jsonl");
+    let stdout = "";
     try {
-      if (lang === "ts") await runTs(n, scenario, logPath, workdir);
-      else { setupFiles(scenario, workdir); runPy(n, scenarioPath, logPath, workdir); }
-    } catch (e) { assert(`step${n} ${lang} runs`, false, e.message.split("\n")[0]); continue; }
+      if (lang === "ts") stdout = await runTs(n, scenario, logPath, workdir);
+      else { setupFiles(scenario, workdir); stdout = runPy(n, scenarioPath, logPath, workdir); }
+    } catch (e) { tag(lang, "did not run: " + e.message.split("\n")[0]); continue; }
+
     const log = readLog(logPath);
+    const requests = log.filter((e) => e.type === "request");
+    const responses = log.filter((e) => e.type === "response");
     norms[lang] = normalize(log);
 
-    // 1) reached the end without exhausting the scripted scenario
-    assert(`step${n} ${lang} not exhausted`, !log.some((e) => e.type === "exhausted"));
-    // 2) the scripted tool calls actually happened
-    const wantTools = scenario.turns.flatMap((t) => (t.tools || []).map((x) => x.name));
-    const gotTools = log.filter((e) => e.type === "response").flatMap((e) => (e.tool_use || []).map((x) => x.name));
-    assert(`step${n} ${lang} tool calls [${wantTools.join(",")}]`, JSON.stringify(wantTools) === JSON.stringify(gotTools), `got [${gotTools.join(",")}]`);
-    // 3) file side effects
-    for (const [name, content] of Object.entries(scenario.assert?.files || {})) {
+    if (log.some((e) => e.type === "exhausted")) tag(lang, "mock scenario exhausted (agent made an unexpected extra call)");
+    // every scripted turn consumed = one request per turn
+    if (requests.length !== scenario.turns.length) tag(lang, `made ${requests.length} model calls, expected ${scenario.turns.length} (final turn not reached?)`);
+    // reached the final turn
+    const last = responses[responses.length - 1];
+    if (expect.finalStopReason && (!last || last.stop_reason !== expect.finalStopReason)) tag(lang, `final stop_reason ${last?.stop_reason} != ${expect.finalStopReason}`);
+    // the tools were actually invoked (in order)
+    const gotTools = responses.flatMap((e) => (e.tool_use || []).map((x) => x.name));
+    if (expect.toolCalls && JSON.stringify(gotTools) !== JSON.stringify(expect.toolCalls)) tag(lang, `tool calls [${gotTools}] != [${expect.toolCalls}]`);
+    // each tool actually ran and produced the right output (its result was fed back)
+    const allResults = requests.flatMap((e) => (e.toolResults || []).map((t) => t.content)).join("\n");
+    for (const sub of expect.toolResultsContain || []) if (!allResults.includes(sub)) tag(lang, `no tool_result contained ${JSON.stringify(sub)} (tool didn't really run / wrong output)`);
+    // the system prompt carries what this chapter added
+    if (expect.systemContains && !requests.some((e) => (e.system || "").includes(expect.systemContains))) tag(lang, `system prompt missing ${JSON.stringify(expect.systemContains)}`);
+    if (expect.stdoutContains && !stdout.includes(expect.stdoutContains)) tag(lang, `stdout missing ${JSON.stringify(expect.stdoutContains)}`);
+    // file side effects
+    for (const [name, content] of Object.entries(expect.files || {})) {
       const p = join(workdir, name);
-      assert(`step${n} ${lang} wrote ${name}`, existsSync(p) && readFileSync(p, "utf-8") === content);
+      if (!existsSync(p) || readFileSync(p, "utf-8") !== content) tag(lang, `file ${name} not written with expected content`);
     }
     rmSync(workdir, { recursive: true, force: true });
   }
-  // 4) parity
-  assert(`step${n} ts/py parity`, norms.ts === norms.py, "event logs differ");
+  if (norms.ts !== norms.py) fails.push(`step${n}: ts/py parity — event logs differ`);
+  return fails;
 }
 
-console.log(fails.length ? `\nTESTS FAILED (${fails.length}): ${fails.join(", ")}` : `\nALL TESTS PASSED (${steps.length} steps × 2 languages)`);
-process.exit(fails.length ? 1 : 0);
+async function main() {
+  ensureBuilt();
+  const map = JSON.parse(readFileSync(join(SCEN, "_map.json"), "utf-8"));
+  const steps = Object.keys(map).map(Number).sort((a, b) => a - b);
+  const allFails = [];
+  for (const n of steps) {
+    const fails = await checkStep(n);
+    console.log(fails.length ? `FAIL step${n}:\n  ${fails.join("\n  ")}` : `ok   step${n} (ts+py: turns consumed, tools ran, results fed back, parity)`);
+    allFails.push(...fails);
+  }
+  console.log(allFails.length ? `\nTESTS FAILED (${allFails.length})` : `\nALL TESTS PASSED (${steps.length} steps × 2 languages)`);
+  process.exit(allFails.length ? 1 : 0);
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) main();

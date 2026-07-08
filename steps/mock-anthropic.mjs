@@ -78,6 +78,14 @@ export function startMock({ scenario, logPath } = {}) {
       const assistantCount = (body.messages || []).filter((m) => m.role === "assistant").length;
       const turn = turns[assistantCount];
 
+      // tool_result blocks the agent sent back — proof the tool actually ran,
+      // with its real output (a broken tool shows up here as wrong content).
+      const toolResults = [];
+      for (const m of body.messages || []) {
+        if (Array.isArray(m.content)) for (const b of m.content) {
+          if (b.type === "tool_result") toolResults.push({ tool_use_id: b.tool_use_id, content: typeof b.content === "string" ? b.content : JSON.stringify(b.content) });
+        }
+      }
       if (logPath) {
         appendFileSync(logPath, JSON.stringify({
           type: "request",
@@ -85,11 +93,7 @@ export function startMock({ scenario, logPath } = {}) {
           turnIndex: assistantCount,
           system: typeof body.system === "string" ? body.system : (Array.isArray(body.system) ? body.system.map((b) => b.text).join("") : ""),
           tools: (body.tools || []).map((t) => t.name),
-          messages: (body.messages || []).map((m) => ({
-            role: m.role,
-            content: typeof m.content === "string" ? m.content
-              : (m.content || []).map((b) => b.type === "tool_use" ? `tool_use:${b.name}` : b.type === "tool_result" ? "tool_result" : b.type),
-          })),
+          toolResults,
           stream: !!body.stream,
         }) + "\n");
       }
