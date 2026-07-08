@@ -25,7 +25,101 @@ graph TB
     style REPL fill:#e8e0ff
 ```
 
+> ▶ **Run this chapter**: `node steps/run.mjs 4` (no API key). It saves a session, then `--resume`s it. Add `--diff` to see what it added over the previous chapter.
+
 ## Our Implementation
+
+Last chapter's agent started blank every time — close the process and everything you said was gone. This chapter gives it a session: save the message array to disk after every turn, read it back on `--resume`. Relative to last chapter, it adds a `session.ts`, and `cli.ts` grows `--resume` and `/clear`:
+
+<!-- @diff file=cli.ts step=4 lang=ts -->
+```diff
+@@ -2,4 +2,5 @@ import * as readline from "readline";
+ import { pathToFileURL } from "url";
+ import { Agent } from "./agent.js";
++import { saveSession, loadSession } from "./session.js";
+ 
+ // A tiny REPL: read a line, hand it to the agent, repeat. One-shot mode runs a
+@@ -13,8 +14,16 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
+ 
+   const agent = new Agent();
++  // --resume: reload the saved conversation before doing anything else.
++  const resume = argv.includes("--resume");
++  argv = argv.filter((a) => a !== "--resume");
++  if (resume) {
++    const saved = loadSession();
++    if (saved) { agent.loadHistory(saved as any); console.log(`(resumed ${saved.length} messages)`); }
++  }
+ 
+   const oneShot = argv.join(" ").trim();
+   if (oneShot) {
+     await agent.chat(oneShot);
++    saveSession(agent.history());
+     return;
+   }
+@@ -27,5 +36,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
+         const input = line.trim();
+         if (input === "exit" || input === "quit") { rl.close(); resolve(); return; }
++        if (input === "/clear") { agent.clearHistory(); saveSession(agent.history()); console.log("(history cleared)"); ask(); return; }
+         if (input) await agent.chat(input);
++        if (input) saveSession(agent.history());
+         ask();
+       });
+```
+<!-- @enddiff -->
+
+The session itself is plain — the whole conversation is already a message array, so saving it is just writing JSON:
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=session.ts region=session step=4 -->
+```typescript
+export function saveSession(messages: unknown[]): void {
+  try { writeFileSync(SESSION_FILE, JSON.stringify(messages, null, 2)); } catch {}
+}
+
+export function loadSession(): unknown[] | null {
+  if (!existsSync(SESSION_FILE)) return null;
+  try { return JSON.parse(readFileSync(SESSION_FILE, "utf-8")); } catch { return null; }
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=session.py region=session step=4 -->
+```python
+def save_session(messages) -> None:
+    try:
+        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump(messages, f, indent=2, default=lambda o: getattr(o, "model_dump", lambda: str(o))())
+    except Exception:
+        pass
+
+
+def load_session():
+    if not os.path.exists(SESSION_FILE):
+        return None
+    try:
+        with open(SESSION_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+Run it: remember something, close, `--resume`, and it still knows:
+
+<!-- @transcript step=4 lang=ts -->
+```
+$ node steps/run.mjs 4
+▶ step 4 demo (no API key — local mock model)   sandbox: <sandbox>
+  $ mini-claude Remember that my favorite color is blue.
+  $ mini-claude --resume What is my favorite color?
+
+Got it — your favorite color is blue.
+(resumed 2 messages)
+Your favorite color is blue.
+```
+<!-- @endtranscript -->
 
 ### Argument Parsing
 

@@ -6,6 +6,7 @@ import os
 SESSION_FILE = os.path.join(os.getcwd(), ".mini-session.json")
 
 
+#region session
 def save_session(messages) -> None:
     try:
         with open(SESSION_FILE, "w", encoding="utf-8") as f:
@@ -22,3 +23,4 @@ def load_session():
             return json.load(f)
     except Exception:
         return None
+#endregion
