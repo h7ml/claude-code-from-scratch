@@ -2,7 +2,9 @@
 
 ## 本章目标
 
-实现完整的权限安全机制：危险命令检测 → 可配置的 allow/deny 权限规则 → 统一权限检查 → 会话级白名单 → 用户确认对话框。从"写死的规则"到"用户定义规则"，让 agent 自动放行安全操作、自动拦截危险操作，无需每次手动确认。
+agent 现在能读写文件、跑任意 Shell 命令了——这也意味着它能 `rm -rf`、能 push 到 main。这一章给它装上刹车。
+
+先写死几条危险命令的检测，再把它做成可配置的 allow/deny 规则，用一个统一的权限检查把关；配上会话级白名单（同一个操作确认过一次就不再问）和危险操作的确认框。一路从「写死的规则」走到「用户自己定义的规则」，让安全操作自动放行、危险操作自动拦下。
 
 ```mermaid
 graph TB
@@ -27,36 +29,6 @@ graph TB
 ```
 
 核心思路：**多层检查，deny 优先**。权限模式（全局策略）→ 配置文件规则（Layer 1）→ 内置危险模式检测（Layer 2）→ 会话白名单 → 用户确认。
-
-## Claude Code 怎么做的
-
-Claude Code 在真实环境执行代码——读写文件、运行 Shell、操作 Git。安全机制不到位，一条 `rm -rf /` 就能造成灾难。因此它采用了**纵深防御（Defense in Depth）**：7 个独立的安全层，即使某一层被绕过，其他层仍然有效。
-
-### 7 层纵深防御
-
-| 层 | 机制 | 核心作用 |
-|----|------|---------|
-| 1 | Trust Dialog | 首次进入目录时确认信任，防止恶意项目的 Hook 自动执行 |
-| 2 | 权限模式 | 全局策略开关（default/plan/acceptEdits/bypassPermissions/dontAsk） |
-| 3 | 权限规则匹配 | allow/deny/ask 规则，8 个来源，优先级从企业策略到会话级 |
-| 4 | Bash AST 分析 | tree-sitter 解析命令为 AST，23 项静态安全检查，FAIL-CLOSED 原则 |
-| 5 | 工具级验证 | validateInput + checkPermissions，保护危险文件路径和路径边界 |
-| 6 | 沙箱隔离 | macOS Seatbelt / Linux namespace，限制文件系统和网络访问范围 |
-| 7 | 用户确认 | 交互对话框 + Hook + ML 分类器竞速，第一个决定生效 |
-
-几个值得了解的设计细节：
-
-**`bypassPermissions`（--yolo）并不是真的绕过一切**。源码检查顺序是：先检查 deny 规则（命中直接拒绝）→ 再检查 bypass-immune 路径（`.git/`、`.claude/` 等仍需确认）→ 最后才跳过普通确认。管理员通过 deny 规则可以对 `--yolo` 施加约束。
-
-**Layer 4 为什么不用正则**：Shell 语法复杂，正则面对 `echo hello$(rm -rf /)` 这类命令会看到的是 `echo hello`，实际执行的却是 `rm -rf /`。tree-sitter 真正解析 AST，不理解的结构（命令替换、变量展开、控制流等）一律标记为 `too-complex`，要求用户确认。
-
-**8 种规则来源，严格优先级**：企业 MDM 策略（不可覆盖）> 用户全局 > 项目级（提交到仓库）> 本地项目（不提交）> CLI 参数 > 运行时参数 > 命令定义 > 会话级（点"始终允许"产生）。低优先级不能覆盖高优先级——企业策略 deny 的操作，用户在任何层级写 allow 都无效。
-
-**3 种匹配类型**：精确匹配（`Bash(git status)`）、前缀匹配（`Bash(npm:*)`）、通配符匹配（`Bash(git * --no-verify)`）。通配符以空格+`*` 结尾时尾部可选，与前缀语法行为保持一致。
-
-**Layer 7 的竞速机制**：UI 对话框、PermissionRequest Hook、ML 分类器三者同时启动，`createResolveOnce` 守卫确保只有第一个决定生效。一旦用户触碰对话框，Hook 和分类器的结果一律被丢弃——人类意图永远优先。对话框还有 200ms 防误触宽限期。
-
-**拒绝追踪**：连续拒绝 3 次触发降级（auto 模式回退到交互确认），总拒绝 20 次中止 Agent 执行——防止模型陷入反复尝试被拒绝操作的死循环。
 
 ## 我们的实现
 
@@ -622,6 +594,38 @@ mini-claude --dont-ask "..."       # dontAsk（CI 环境）
 
 **为什么没有 ask 规则**：Claude Code 的 ask 是给 bypassPermissions 设安全阀用的。我们的 `--yolo` 语义是"完全信任"，加 ask 规则反而矛盾。需要强制确认的操作，不加入 allow 列表就行——自然落到 Layer 2 的内置检查。
 
+## 真实 Claude Code 比这多做了什么
+
+我们的权限是三层：deny 规则、模式快捷、内置危险检查加确认。真实 Claude Code 是七层——多出来的，是把「就算某一层被绕过，其他层还拦得住」这件事做到底。
+
+Claude Code 在真实环境执行代码——读写文件、运行 Shell、操作 Git。安全机制不到位，一条 `rm -rf /` 就能造成灾难。因此它采用了纵深防御（Defense in Depth）：7 个独立的安全层，即使某一层被绕过，其他层仍然有效。
+
+### 7 层纵深防御
+
+| 层 | 机制 | 核心作用 |
+|----|------|---------|
+| 1 | Trust Dialog | 首次进入目录时确认信任，防止恶意项目的 Hook 自动执行 |
+| 2 | 权限模式 | 全局策略开关（default/plan/acceptEdits/bypassPermissions/dontAsk） |
+| 3 | 权限规则匹配 | allow/deny/ask 规则，8 个来源，优先级从企业策略到会话级 |
+| 4 | Bash AST 分析 | tree-sitter 解析命令为 AST，23 项静态安全检查，FAIL-CLOSED 原则 |
+| 5 | 工具级验证 | validateInput + checkPermissions，保护危险文件路径和路径边界 |
+| 6 | 沙箱隔离 | macOS Seatbelt / Linux namespace，限制文件系统和网络访问范围 |
+| 7 | 用户确认 | 交互对话框 + Hook + ML 分类器竞速，第一个决定生效 |
+
+几个值得了解的设计细节：
+
+**`bypassPermissions`（--yolo）并不是真的绕过一切**。源码检查顺序是：先检查 deny 规则（命中直接拒绝）→ 再检查 bypass-immune 路径（`.git/`、`.claude/` 等仍需确认）→ 最后才跳过普通确认。管理员通过 deny 规则可以对 `--yolo` 施加约束。
+
+**Layer 4 为什么不用正则**：Shell 语法复杂，正则面对 `echo hello$(rm -rf /)` 这类命令会看到的是 `echo hello`，实际执行的却是 `rm -rf /`。tree-sitter 真正解析 AST，不理解的结构（命令替换、变量展开、控制流等）一律标记为 `too-complex`，要求用户确认。
+
+**8 种规则来源，严格优先级**：企业 MDM 策略（不可覆盖）> 用户全局 > 项目级（提交到仓库）> 本地项目（不提交）> CLI 参数 > 运行时参数 > 命令定义 > 会话级（点"始终允许"产生）。低优先级不能覆盖高优先级——企业策略 deny 的操作，用户在任何层级写 allow 都无效。
+
+**3 种匹配类型**：精确匹配（`Bash(git status)`）、前缀匹配（`Bash(npm:*)`）、通配符匹配（`Bash(git * --no-verify)`）。通配符以空格+`*` 结尾时尾部可选，与前缀语法行为保持一致。
+
+**Layer 7 的竞速机制**：UI 对话框、PermissionRequest Hook、ML 分类器三者同时启动，`createResolveOnce` 守卫确保只有第一个决定生效。一旦用户触碰对话框，Hook 和分类器的结果一律被丢弃——人类意图永远优先。对话框还有 200ms 防误触宽限期。
+
+**拒绝追踪**：连续拒绝 3 次触发降级（auto 模式回退到交互确认），总拒绝 20 次中止 Agent 执行——防止模型陷入反复尝试被拒绝操作的死循环。
+
 ## 与 Claude Code 的差距
 
 | 维度 | Claude Code | mini-claude |
@@ -637,7 +641,6 @@ mini-claude --dont-ask "..."       # dontAsk（CI 环境）
 | 拒绝追踪 | 3/20 次阈值降级 | 无 |
 
 核心架构已对齐——5 种权限模式 + 配置化规则 + 内置检测，层次清晰。从"写死的规则"到"用户定义规则"，是从个人工具迈向团队工具的关键一步。
-
 ---
 
 > **下一章**：Agent 对话越来越长，上下文窗口快满了——4 层压缩流水线让它看起来拥有无限记忆。

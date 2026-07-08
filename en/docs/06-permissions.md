@@ -2,7 +2,9 @@
 
 ## Chapter Goals
 
-Implement a complete permission security mechanism: dangerous command detection -> configurable allow/deny permission rules -> unified permission check -> session-level whitelist -> user confirmation dialog. From "hardcoded rules" to "user-defined rules," letting the agent automatically approve safe operations and automatically block dangerous ones, without requiring manual confirmation every time.
+The agent can now read/write files and run any shell command — which also means it can `rm -rf` and push to main. This chapter gives it brakes.
+
+Start with a few hardcoded checks for dangerous commands, then make it configurable allow/deny rules gated by one unified permission check; add a session-level whitelist (confirm an operation once and it won't ask again) and a confirmation dialog for dangerous actions. The path runs from "hardcoded rules" to "rules the user defines," letting safe operations through automatically and blocking dangerous ones.
 
 ```mermaid
 graph TB
@@ -27,36 +29,6 @@ graph TB
 ```
 
 Core approach: **Multi-layer checks, deny takes priority**. Permission mode (global policy) -> config file rules (Layer 1) -> built-in danger pattern detection (Layer 2) -> session whitelist -> user confirmation.
-
-## How Claude Code Does It
-
-Claude Code executes code in real environments -- reading and writing files, running shells, manipulating Git. Without proper security mechanisms, a single `rm -rf /` could cause disaster. That's why it employs **Defense in Depth**: 7 independent security layers, so even if one layer is bypassed, the others remain effective.
-
-### 7 Layers of Defense in Depth
-
-| Layer | Mechanism | Core Purpose |
-|-------|-----------|-------------|
-| 1 | Trust Dialog | Confirms trust when first entering a directory, preventing malicious project hooks from auto-executing |
-| 2 | Permission modes | Global policy switch (default/plan/acceptEdits/bypassPermissions/dontAsk) |
-| 3 | Permission rule matching | allow/deny/ask rules, 8 sources, priority from enterprise policy to session-level |
-| 4 | Bash AST analysis | tree-sitter parses commands into AST, 23 static safety checks, FAIL-CLOSED principle |
-| 5 | Tool-level validation | validateInput + checkPermissions, protecting dangerous file paths and path boundaries |
-| 6 | Sandbox isolation | macOS Seatbelt / Linux namespace, limiting filesystem and network access scope |
-| 7 | User confirmation | Interactive dialog + Hook + ML classifier racing, first decision wins |
-
-A few design details worth understanding:
-
-**`bypassPermissions` (--yolo) doesn't actually bypass everything**. The source code check order is: first check deny rules (if hit, reject immediately) -> then check bypass-immune paths (`.git/`, `.claude/`, etc. still require confirmation) -> only then skip normal confirmation. Administrators can constrain `--yolo` through deny rules.
-
-**Why Layer 4 doesn't use regex**: Shell syntax is complex. Faced with a command like `echo hello$(rm -rf /)`, regex sees `echo hello`, but what actually executes is `rm -rf /`. tree-sitter actually parses the AST, and structures it doesn't understand (command substitution, variable expansion, control flow, etc.) are all marked as `too-complex`, requiring user confirmation.
-
-**8 rule sources with strict priority**: Enterprise MDM policy (non-overridable) > user global > project-level (committed to repo) > local project (not committed) > CLI arguments > runtime arguments > command definitions > session-level (produced by clicking "always allow"). Lower priority cannot override higher priority -- an operation denied by enterprise policy cannot be allowed at any user level.
-
-**3 matching types**: Exact match (`Bash(git status)`), prefix match (`Bash(npm:*)`), wildcard match (`Bash(git * --no-verify)`). When a wildcard ends with space + `*`, the tail is optional, maintaining consistent behavior with prefix syntax.
-
-**Layer 7's racing mechanism**: The UI dialog, PermissionRequest Hook, and ML classifier all start simultaneously. A `createResolveOnce` guard ensures only the first decision takes effect. Once the user touches the dialog, results from the Hook and classifier are discarded -- human intent always takes priority. The dialog also has a 200ms grace period to prevent accidental clicks.
-
-**Denial tracking**: 3 consecutive denials trigger a downgrade (auto mode falls back to interactive confirmation); 20 total denials abort Agent execution -- preventing the model from falling into a loop of repeatedly attempting denied operations.
 
 ## Our Implementation
 
@@ -622,6 +594,38 @@ Rules from both files are merged and take effect together. Rule format:
 
 **Why no ask rule**: Claude Code's ask is for setting safety valves on bypassPermissions. Our `--yolo` semantics mean "full trust" -- adding ask rules would be contradictory. Operations that need mandatory confirmation simply shouldn't be in the allow list -- they'll naturally fall through to Layer 2's built-in checks.
 
+## What the Real Claude Code Does Beyond This
+
+Our permissions are three layers: deny rules, mode shortcuts, and built-in dangerous-command checks plus confirmation. The real Claude Code is seven — and what those extra layers add is taking "even if one layer is bypassed, the others still hold" all the way.
+
+Claude Code executes code in real environments -- reading and writing files, running shells, manipulating Git. Without proper security mechanisms, a single `rm -rf /` could cause disaster. That's why it employs Defense in Depth: 7 independent security layers, so even if one layer is bypassed, the others remain effective.
+
+### 7 Layers of Defense in Depth
+
+| Layer | Mechanism | Core Purpose |
+|-------|-----------|-------------|
+| 1 | Trust Dialog | Confirms trust when first entering a directory, preventing malicious project hooks from auto-executing |
+| 2 | Permission modes | Global policy switch (default/plan/acceptEdits/bypassPermissions/dontAsk) |
+| 3 | Permission rule matching | allow/deny/ask rules, 8 sources, priority from enterprise policy to session-level |
+| 4 | Bash AST analysis | tree-sitter parses commands into AST, 23 static safety checks, FAIL-CLOSED principle |
+| 5 | Tool-level validation | validateInput + checkPermissions, protecting dangerous file paths and path boundaries |
+| 6 | Sandbox isolation | macOS Seatbelt / Linux namespace, limiting filesystem and network access scope |
+| 7 | User confirmation | Interactive dialog + Hook + ML classifier racing, first decision wins |
+
+A few design details worth understanding:
+
+**`bypassPermissions` (--yolo) doesn't actually bypass everything**. The source code check order is: first check deny rules (if hit, reject immediately) -> then check bypass-immune paths (`.git/`, `.claude/`, etc. still require confirmation) -> only then skip normal confirmation. Administrators can constrain `--yolo` through deny rules.
+
+**Why Layer 4 doesn't use regex**: Shell syntax is complex. Faced with a command like `echo hello$(rm -rf /)`, regex sees `echo hello`, but what actually executes is `rm -rf /`. tree-sitter actually parses the AST, and structures it doesn't understand (command substitution, variable expansion, control flow, etc.) are all marked as `too-complex`, requiring user confirmation.
+
+**8 rule sources with strict priority**: Enterprise MDM policy (non-overridable) > user global > project-level (committed to repo) > local project (not committed) > CLI arguments > runtime arguments > command definitions > session-level (produced by clicking "always allow"). Lower priority cannot override higher priority -- an operation denied by enterprise policy cannot be allowed at any user level.
+
+**3 matching types**: Exact match (`Bash(git status)`), prefix match (`Bash(npm:*)`), wildcard match (`Bash(git * --no-verify)`). When a wildcard ends with space + `*`, the tail is optional, maintaining consistent behavior with prefix syntax.
+
+**Layer 7's racing mechanism**: The UI dialog, PermissionRequest Hook, and ML classifier all start simultaneously. A `createResolveOnce` guard ensures only the first decision takes effect. Once the user touches the dialog, results from the Hook and classifier are discarded -- human intent always takes priority. The dialog also has a 200ms grace period to prevent accidental clicks.
+
+**Denial tracking**: 3 consecutive denials trigger a downgrade (auto mode falls back to interactive confirmation); 20 total denials abort Agent execution -- preventing the model from falling into a loop of repeatedly attempting denied operations.
+
 ## Gap Analysis with Claude Code
 
 | Dimension | Claude Code | mini-claude |
@@ -637,7 +641,6 @@ Rules from both files are merged and take effect together. Rule format:
 | Denial tracking | 3/20 threshold downgrade | None |
 
 The core architecture is aligned -- 5 permission modes + configurable rules + built-in detection, with clear layering. Moving from "hardcoded rules" to "user-defined rules" is the key step from a personal tool to a team tool.
-
 ---
 
 > **Next chapter**: Agent conversations get longer and longer, and the context window is filling up -- the 4-layer compression pipeline gives it seemingly unlimited memory.
