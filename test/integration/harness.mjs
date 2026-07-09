@@ -11,7 +11,7 @@
 //                    send the next; the only way to answer a mid-turn confirm /
 //                    plan-approval prompt (those read input WHILE a turn runs).
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -82,10 +82,12 @@ function loadDotenv(p) {
   return out;
 }
 const LIVE = loadDotenv(join(REPO, ".env"));
-// Is a real key present for this backend? Live tests skip cleanly when not.
+// Is a real key present for this backend? Gate on .env ONLY (the project's
+// configured live keys) — NOT ambient process.env, which may leak an unrelated /
+// broken key and wrongly un-skip a live test. No .env key → skip cleanly.
 export function liveKeyAvailable(backend) {
-  if (backend === "anthropic") return !!(LIVE.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY);
-  return !!((LIVE.OPENAI_API_KEY || process.env.OPENAI_API_KEY) && (LIVE.OPENAI_BASE_URL || process.env.OPENAI_BASE_URL));
+  if (backend === "anthropic") return !!LIVE.ANTHROPIC_API_KEY;
+  return !!(LIVE.OPENAI_API_KEY && LIVE.OPENAI_BASE_URL);
 }
 
 // Build the child env for a given backend, in mock or live mode. Always clears
@@ -100,13 +102,13 @@ function makeEnv({ backend = "openai", mockPort, home, live = false, model }) {
   for (const k of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
                    "http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete env[k];
   if (live) {
+    // Source live keys from .env only (matches liveKeyAvailable's gate).
     if (backend === "anthropic") {
-      env.ANTHROPIC_API_KEY = LIVE.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
-      const base = LIVE.ANTHROPIC_BASE_URL || process.env.ANTHROPIC_BASE_URL;
-      if (base) env.ANTHROPIC_BASE_URL = base;
+      env.ANTHROPIC_API_KEY = LIVE.ANTHROPIC_API_KEY;
+      if (LIVE.ANTHROPIC_BASE_URL) env.ANTHROPIC_BASE_URL = LIVE.ANTHROPIC_BASE_URL;
     } else {
-      env.OPENAI_API_KEY = LIVE.OPENAI_API_KEY || process.env.OPENAI_API_KEY;
-      env.OPENAI_BASE_URL = LIVE.OPENAI_BASE_URL || process.env.OPENAI_BASE_URL;
+      env.OPENAI_API_KEY = LIVE.OPENAI_API_KEY;
+      env.OPENAI_BASE_URL = LIVE.OPENAI_BASE_URL;
     }
     if (model) env.MINI_CLAUDE_MODEL = model;
   } else {
@@ -118,13 +120,19 @@ function makeEnv({ backend = "openai", mockPort, home, live = false, model }) {
   return env;
 }
 
-function initSandbox(gitInit) {
+function initSandbox(gitInit, files = {}) {
   const sandbox = mkdtempSync(join(tmpdir(), "mc-cwd-"));
   if (gitInit) {
     const g = (a) => spawnSync("git", a, { cwd: sandbox, stdio: "ignore" });
     g(["init", "-q"]); g(["config", "user.email", "t@t.co"]); g(["config", "user.name", "t"]);
     writeFileSync(join(sandbox, "README.md"), "hi\n");
     g(["add", "-A"]); g(["commit", "-qm", "init"]);
+  }
+  // Seed arbitrary files into the sandbox (e.g. .claude/settings.json for MCP).
+  for (const [rel, content] of Object.entries(files)) {
+    const p = join(sandbox, rel);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, content);
   }
   return sandbox;
 }
@@ -154,12 +162,12 @@ export async function runRepl(opts = {}) {
     script = {}, args = [], stdin = [], python = false,
     pythonBin = process.env.INTEG_PYTHON || "python3",
     gitInit = false, timeoutMs = 30000, signalAfterMs = 0, allowExhausted = [],
-    backend = "openai", live = false, model,
+    backend = "openai", live = false, model, sandboxFiles = {},
   } = opts;
 
   const mock = live ? null : await startMock(script);
   const home = mkdtempSync(join(tmpdir(), "mc-home-"));
-  const sandbox = initSandbox(gitInit);
+  const sandbox = initSandbox(gitInit, sandboxFiles);
   try {
     const env = makeEnv({ backend, mockPort: mock?.port, home, live, model });
     const child = spawnCli({ python, pythonBin, args, env, cwd: sandbox });
@@ -197,12 +205,12 @@ export async function runReplInteractive(opts = {}) {
     script = {}, args = [], steps = [], python = false,
     pythonBin = process.env.INTEG_PYTHON || "python3",
     gitInit = false, timeoutMs = 30000, stepTimeoutMs = 8000, allowExhausted = [],
-    backend = "openai", live = false, model,
+    backend = "openai", live = false, model, sandboxFiles = {},
   } = opts;
 
   const mock = live ? null : await startMock(script);
   const home = mkdtempSync(join(tmpdir(), "mc-home-"));
-  const sandbox = initSandbox(gitInit);
+  const sandbox = initSandbox(gitInit, sandboxFiles);
   try {
     const child = spawnCli({ python, pythonBin, args, env: makeEnv({ backend, mockPort: mock?.port, home, live, model }), cwd: sandbox });
     let stdout = "", stderr = "";

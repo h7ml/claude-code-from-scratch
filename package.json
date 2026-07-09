@@ -26,7 +26,8 @@
     "steps:selftest:py": ".venv/bin/python steps/mock_anthropic.selftest.py",
     "steps:docs": "node steps/docs-sync.mjs",
     "steps:docs:check": "node steps/docs-sync.mjs --check",
-    "steps:ci": "node steps/lint-markers.mjs && node steps/mock-anthropic.selftest.mjs && .venv/bin/python steps/mock_anthropic.selftest.py && node steps/test.mjs && node steps/test.selfcheck.mjs && node steps/docs-sync.mjs --check"
+    "steps:ci": "node steps/lint-markers.mjs && node steps/mock-anthropic.selftest.mjs && .venv/bin/python steps/mock_anthropic.selftest.py && node steps/test.mjs && node steps/test.selfcheck.mjs && node steps/docs-sync.mjs --check",
+    "test:live": "tsc && node --test test/integration/*.livetest.mjs"
   },
   "keywords": [
     "claude-code",
