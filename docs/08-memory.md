@@ -18,7 +18,7 @@ graph TB
     style Inject fill:#e8e0ff
 ```
 
-> ▶ **跑这一章**：`node steps/run.mjs 8`（无需 API key）——看它从磁盘里的记忆认出「部署去 staging」。加 `--diff` 看它比上一章多了什么。
+> ▶ **跑这一章**：`node steps/run.mjs 8`（无需 API key）——看它从磁盘里的记忆认出「部署去 staging」。加 `--diff` 看它比上一章多了什么。想拿自己的 prompt 连真实模型，就加 `--live`（读 `.env` 里的 key，`--py` 跑 Python 版）。
 
 ---
 

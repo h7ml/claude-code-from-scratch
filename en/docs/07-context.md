@@ -32,7 +32,7 @@ graph TD
     style Summary fill:#7c5cfc,color:#fff
 ```
 
-> ▶ **Run this chapter**: `node steps/run.mjs 7` (no API key) — watch it summarize older messages once the conversation grows. Add `--diff` to see what it added over the previous chapter.
+> ▶ **Run this chapter**: `node steps/run.mjs 7` (no API key) — watch it summarize older messages once the conversation grows. Add `--diff` to see what it added over the previous chapter. To run your own prompt against a real model, add `--live` (it reads the key from `.env`; `--py` runs the Python version).
 
 ## Our Implementation
 

@@ -30,7 +30,7 @@ graph TB
     style Block fill:#ff6b6b,color:#fff
 ```
 
-> ▶ **Run this chapter**: `node steps/run.mjs 6` (no API key) — watch it block an `rm -rf`. Add `--diff` to see what it added over the previous chapter.
+> ▶ **Run this chapter**: `node steps/run.mjs 6` (no API key) — watch it block an `rm -rf`. Add `--diff` to see what it added over the previous chapter. To run your own prompt against a real model, add `--live` (it reads the key from `.env`; `--py` runs the Python version).
 
 Core approach: **deny takes priority, and even `--yolo` can't get past it**. deny rules first, then plan mode's read-only contract, and only then bypass / allow rules / built-in danger detection / session whitelist / user confirmation.
 

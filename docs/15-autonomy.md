@@ -12,7 +12,7 @@
 
 三者的分工可以先记一句话：`/goal` 决定**要不要**继续，`/loop` 决定**什么时候**开始下一次，Auto Mode 决定**能不能**放行某个动作。代码集中在新增的 `src/autonomy.ts` 和 `python/mini_claude/autonomy.py`（提示词与纯逻辑），接线在 `agent` 和 CLI 里。
 
-> ▶ **跑这一章**：`node steps/run.mjs 15`（无需 API key）——看 `/goal` 把一个条件追到达成。加 `--diff` 看它比第 12 章多了什么。
+> ▶ **跑这一章**：`node steps/run.mjs 15`（无需 API key）——看 `/goal` 把一个条件追到达成。加 `--diff` 看它比第 12 章多了什么。想拿自己的 prompt 连真实模型，就加 `--live`（读 `.env` 里的 key，`--py` 跑 Python 版）。
 
 教学轨（`steps/`）把其中两件做成了能跑的最小实现：`/goal`（评估器回灌）和 `--auto`（分类器代替确认框）；`/loop` 只在下文讲、不在最小实现里。相对第 12 章，新增了一个 `autonomy.ts`，agent 多了个 `pursueGoal` 和一段 auto-mode 拦截：
 

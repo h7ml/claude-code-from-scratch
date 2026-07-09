@@ -242,12 +242,14 @@
       transform: translateY(-2px);
       box-shadow: 0 4px 16px rgba(124, 92, 252, 0.3);
     }
-    /* Diff blocks (```diff): GitHub-style green/red lines, readable in light + dark */
-    .token.inserted { color: #22863a; background: rgba(46, 160, 67, 0.15); display: inline-block; width: 100%; }
-    .token.deleted  { color: #b31d28; background: rgba(248, 81, 73, 0.15); display: inline-block; width: 100%; }
-    .token.coord    { color: #6a737d; }
-    [data-theme="dark"] .token.inserted { color: #7ee787; background: rgba(46, 160, 67, 0.20); }
-    [data-theme="dark"] .token.deleted  { color: #ffa198; background: rgba(248, 81, 73, 0.20); }
+    /* Diff blocks (```diff): GitHub-style green/red full-line highlight, light + dark.
+       Target the full-line token (:not(.prefix)) with display:block so the newline
+       inside .token.line lays out correctly — an inline-block + width:100% breaks it. */
+    .token.inserted:not(.prefix) { display: block; color: #22863a; background: rgba(46, 160, 67, 0.15); }
+    .token.deleted:not(.prefix)  { display: block; color: #b31d28; background: rgba(248, 81, 73, 0.15); }
+    .token.coord { color: #6a737d; }
+    [data-theme="dark"] .token.inserted:not(.prefix) { color: #7ee787; background: rgba(46, 160, 67, 0.18); }
+    [data-theme="dark"] .token.deleted:not(.prefix)  { color: #ffa198; background: rgba(248, 81, 73, 0.18); }
   </style>
 </head>
 <body>

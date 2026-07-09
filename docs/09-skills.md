@@ -26,7 +26,7 @@ graph TB
     style Inject fill:#e8e0ff
 ```
 
-> ▶ **跑这一章**：`node steps/run.mjs 9`（无需 API key）——看 `/commit` 调起一个技能。加 `--diff` 看它比上一章多了什么。
+> ▶ **跑这一章**：`node steps/run.mjs 9`（无需 API key）——看 `/commit` 调起一个技能。加 `--diff` 看它比上一章多了什么。想拿自己的 prompt 连真实模型，就加 `--live`（读 `.env` 里的 key，`--py` 跑 Python 版）。
 
 ---
 

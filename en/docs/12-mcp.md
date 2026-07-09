@@ -23,7 +23,7 @@ graph TB
     style Agent fill:#e8e0ff
 ```
 
-> ▶ **Run this chapter**: `node steps/run.mjs 12` (no API key) — watch the model call an `add` tool from an external MCP server. Add `--diff` to see what it added over the previous chapter.
+> ▶ **Run this chapter**: `node steps/run.mjs 12` (no API key) — watch the model call an `add` tool from an external MCP server. Add `--diff` to see what it added over the previous chapter. To run your own prompt against a real model, add `--live` (it reads the key from `.env`; `--py` runs the Python version).
 
 Core idea: **spawn child process -> JSON-RPC handshake -> discover tools -> register with prefix -> transparent routing**. From the Agent Loop's perspective, MCP tools and built-in tools are indistinguishable -- they're all name + schema + execution function.
 

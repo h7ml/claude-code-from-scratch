@@ -24,7 +24,7 @@ graph TB
     style Reminder fill:#e8e0ff
 ```
 
-> ▶ **Run this chapter**: `node steps/run.mjs 3` (no API key). Add `--diff` to see what it added over the previous chapter.
+> ▶ **Run this chapter**: `node steps/run.mjs 3` (no API key). Add `--diff` to see what it added over the previous chapter. To run your own prompt against a real model, add `--live` (it reads the key from `.env`; `--py` runs the Python version).
 
 ## Our Implementation
 

@@ -21,7 +21,7 @@ graph TB
     style D fill:#e8e0ff
 ```
 
-> ▶ **跑这一章**：`node steps/run.mjs 1`（无需 API key，走本地 mock 模型）。加 `--py` 跑 Python 版。
+> ▶ **跑这一章**：`node steps/run.mjs 1`（无需 API key，走本地 mock 模型）。加 `--py` 跑 Python 版。想拿自己的 prompt 连真实模型，就加 `--live`（读 `.env` 里的 key）。
 
 ## 第一版：一个只会聊天的循环
 

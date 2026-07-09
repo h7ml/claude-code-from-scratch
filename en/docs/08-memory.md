@@ -18,7 +18,7 @@ graph TB
     style Inject fill:#e8e0ff
 ```
 
-> ▶ **Run this chapter**: `node steps/run.mjs 8` (no API key) — watch it recall "deploy to staging" from a memory file. Add `--diff` to see what it added over the previous chapter.
+> ▶ **Run this chapter**: `node steps/run.mjs 8` (no API key) — watch it recall "deploy to staging" from a memory file. Add `--diff` to see what it added over the previous chapter. To run your own prompt against a real model, add `--live` (it reads the key from `.env`; `--py` runs the Python version).
 
 ---
 

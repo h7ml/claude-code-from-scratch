@@ -27,7 +27,7 @@ graph TB
     style Manual fill:#ffe0e0
 ```
 
-> ▶ **Run this chapter**: `node steps/run.mjs 10` (no API key) — watch a write get blocked under `--plan`. Add `--diff` to see what it added over the previous chapter.
+> ▶ **Run this chapter**: `node steps/run.mjs 10` (no API key) — watch a write get blocked under `--plan`. Add `--diff` to see what it added over the previous chapter. To run your own prompt against a real model, add `--live` (it reads the key from `.env`; `--py` runs the Python version).
 
 ## Our Implementation
 

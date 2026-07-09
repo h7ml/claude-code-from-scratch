@@ -25,7 +25,7 @@ graph TB
     style REPL fill:#e8e0ff
 ```
 
-> ▶ **跑这一章**：`node steps/run.mjs 4`（无需 API key）。它会存一次会话、再 `--resume` 接着聊。加 `--diff` 看它比上一章多了什么。
+> ▶ **跑这一章**：`node steps/run.mjs 4`（无需 API key）。它会存一次会话、再 `--resume` 接着聊。加 `--diff` 看它比上一章多了什么。想拿自己的 prompt 连真实模型，就加 `--live`（读 `.env` 里的 key，`--py` 跑 Python 版）。
 
 ## 我们的实现
 

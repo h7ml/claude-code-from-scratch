@@ -30,7 +30,7 @@ graph TB
     style Block fill:#ff6b6b,color:#fff
 ```
 
-> ▶ **跑这一章**：`node steps/run.mjs 6`（无需 API key）——看它把一条 `rm -rf` 拦下来。加 `--diff` 看它比上一章多了什么。
+> ▶ **跑这一章**：`node steps/run.mjs 6`（无需 API key）——看它把一条 `rm -rf` 拦下来。加 `--diff` 看它比上一章多了什么。想拿自己的 prompt 连真实模型，就加 `--live`（读 `.env` 里的 key，`--py` 跑 Python 版）。
 
 核心思路：**deny 优先，连 `--yolo` 也拦得住**。先查 deny 规则，再看 plan 的只读契约，然后才轮到 bypass / allow 规则 / 内置危险检测 / 会话白名单 / 用户确认。
 

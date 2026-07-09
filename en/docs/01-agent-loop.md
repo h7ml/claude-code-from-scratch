@@ -21,7 +21,7 @@ graph TB
     style D fill:#e8e0ff
 ```
 
-> ▶ **Run this chapter**: `node steps/run.mjs 1` (no API key — a local mock model). Add `--py` for the Python version.
+> ▶ **Run this chapter**: `node steps/run.mjs 1` (no API key — a local mock model). Add `--py` for the Python version. To run your own prompt against a real model, add `--live` (it reads the key from `.env`).
 
 ## First Version: A Loop That Only Chats
 

@@ -25,7 +25,7 @@ graph TB
     style REPL fill:#e8e0ff
 ```
 
-> ▶ **Run this chapter**: `node steps/run.mjs 4` (no API key). It saves a session, then `--resume`s it. Add `--diff` to see what it added over the previous chapter.
+> ▶ **Run this chapter**: `node steps/run.mjs 4` (no API key). It saves a session, then `--resume`s it. Add `--diff` to see what it added over the previous chapter. To run your own prompt against a real model, add `--live` (it reads the key from `.env`; `--py` runs the Python version).
 
 ## Our Implementation
 

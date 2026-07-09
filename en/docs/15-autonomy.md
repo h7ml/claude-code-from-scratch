@@ -12,7 +12,7 @@ Earlier chapters let the agent finish a job within one turn. This chapter is abo
 
 One sentence captures the division of labor: `/goal` decides **whether** to continue, `/loop` decides **when** the next run starts, and Auto Mode decides **whether** a given action is allowed. The code lives in the new `src/autonomy.ts` and `python/mini_claude/autonomy.py` (prompts and pure logic), wired into `agent` and the CLI.
 
-> ▶ **Run this chapter**: `node steps/run.mjs 15` (no API key) — watch `/goal` chase a condition until it is met. Add `--diff` to see what it added over chapter 12.
+> ▶ **Run this chapter**: `node steps/run.mjs 15` (no API key) — watch `/goal` chase a condition until it is met. Add `--diff` to see what it added over chapter 12. To run your own prompt against a real model, add `--live` (it reads the key from `.env`; `--py` runs the Python version).
 
 The teaching track (`steps/`) implements two of these as runnable minimal versions: `/goal` (the evaluator reinjection loop) and `--auto` (a classifier replacing the confirmation dialog); `/loop` is only discussed below, not in the minimal implementation. Relative to chapter 12, it adds an `autonomy.ts`, and the agent gains a `pursueGoal` plus an auto-mode intercept:
 
